@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 from pathlib import Path
 
-from flask import Flask, request, jsonify, g
+from flask import Flask, request, jsonify, g, Response
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -98,6 +98,15 @@ if not init_database():
     logger.error("Failed to initialize the database. The application will not start.")
     # Don't exit here as this will prevent gunicorn from starting
     # Instead, the lookup functions will return appropriate errors
+
+def pretty_json_response(data, status_code=200):
+    """Create a pretty-printed JSON response"""
+    response = Response(
+        json.dumps(data, indent=2, ensure_ascii=False),
+        status=status_code,
+        mimetype='application/json'
+    )
+    return response
 
 def get_real_ip() -> str:
     """
@@ -231,7 +240,7 @@ def root():
     """Simplified IP lookup endpoint"""
     # Validate API key if authentication is enabled
     if not app.config['DISABLE_API_KEY_AUTH'] and not validate_api_key():
-        return jsonify({"error": "Invalid or missing API key"}), 401
+        return pretty_json_response({"error": "Invalid or missing API key"}, 401)
     
     # Get IP address from query parameter or use client IP
     ip = request.args.get('ip')
@@ -252,14 +261,14 @@ def root():
             "queried_ip": ip
         })
         
-        return jsonify(result)
+        return pretty_json_response(result)
         
     except ValueError as e:
         logger.warning(f"Invalid IP address provided: {ip}")
-        return jsonify({"error": f"Invalid IP address: {ip}"}), 400
+        return pretty_json_response({"error": f"Invalid IP address: {ip}"}, 400)
     except Exception as e:
         logger.error(f"Error processing lookup request: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+        return pretty_json_response({"error": "Internal server error"}, 500)
 
 @app.route('/health')
 def health():
@@ -276,7 +285,7 @@ def health():
     except Exception as e:
         db_status = f"error: {str(e)}"
     
-    return jsonify({
+    return pretty_json_response({
         "status": "healthy" if db_status == "healthy" else "degraded",
         "timestamp": datetime.utcnow().isoformat(),
         "database": {
@@ -299,7 +308,7 @@ def lookup_ip():
     """
     # Validate API key
     if not validate_api_key():
-        return jsonify({"error": "Invalid or missing API key"}), 401
+        return pretty_json_response({"error": "Invalid or missing API key"}, 401)
     
     # Get IP address from query parameter or use client IP
     ip = request.args.get('ip')
@@ -320,14 +329,14 @@ def lookup_ip():
             "queried_ip": ip
         })
         
-        return jsonify(result)
+        return pretty_json_response(result)
         
     except ValueError as e:
         logger.warning(f"Invalid IP address provided: {ip}")
-        return jsonify({"error": f"Invalid IP address: {ip}"}), 400
+        return pretty_json_response({"error": f"Invalid IP address: {ip}"}, 400)
     except Exception as e:
         logger.error(f"Error processing lookup request: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+        return pretty_json_response({"error": "Internal server error"}, 500)
 
 @app.route('/api/v1/lookup/batch', methods=['POST'])
 @limiter.limit("10 per minute")
@@ -337,16 +346,16 @@ def lookup_batch():
     Request body should contain JSON with 'ips' array
     """
     if not validate_api_key():
-        return jsonify({"error": "Invalid or missing API key"}), 401
+        return pretty_json_response({"error": "Invalid or missing API key"}, 401)
     
     try:
         data = request.get_json()
         if not data or 'ips' not in data:
-            return jsonify({"error": "Missing 'ips' array in request body"}), 400
+            return pretty_json_response({"error": "Missing 'ips' array in request body"}, 400)
         
         ips = data['ips']
         if not isinstance(ips, list) or len(ips) > 100:
-            return jsonify({"error": "Invalid 'ips' array (max 100 IPs)"}), 400
+            return pretty_json_response({"error": "Invalid 'ips' array (max 100 IPs)"}, 400)
         
         results = []
         for ip in ips:
@@ -365,7 +374,7 @@ def lookup_batch():
                     "error": "Lookup failed"
                 })
         
-        return jsonify({
+        return pretty_json_response({
             "results": results,
             "timestamp": datetime.utcnow().isoformat(),
             "client_ip": get_real_ip(),
@@ -374,12 +383,12 @@ def lookup_batch():
         
     except Exception as e:
         logger.error(f"Error processing batch lookup: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+        return pretty_json_response({"error": "Internal server error"}, 500)
 
 @app.route('/api/v1/info')
 def api_info():
     """API information endpoint"""
-    return jsonify({
+    return pretty_json_response({
         "service": "IP2Location LITE API",
         "version": "2.0.0",
         "database_type": "binary",
@@ -405,20 +414,20 @@ def api_info():
 @app.errorhandler(429)
 def ratelimit_handler(e):
     """Rate limit exceeded handler"""
-    return jsonify({
+    return pretty_json_response({
         "error": "Rate limit exceeded",
         "message": "Too many requests. Please try again later.",
         "client_ip": get_real_ip()
-    }), 429
+    }, 429)
 
 @app.errorhandler(500)
 def internal_error(e):
     """Internal server error handler"""
     logger.error(f"Internal server error: {e}")
-    return jsonify({
+    return pretty_json_response({
         "error": "Internal server error",
         "message": "An unexpected error occurred"
-    }), 500
+    }, 500)
 
 if __name__ == '__main__':
     logger.info("Starting IP2Location API service...")
