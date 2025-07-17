@@ -47,6 +47,9 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
+# Configure JSON pretty printing
+app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
+
 # Configuration
 app.config['IP2LOCATION_DATABASE_PATH'] = os.getenv('IP2LOCATION_DATABASE_PATH')
 app.config['API_KEY'] = os.getenv('API_KEY')
