@@ -182,9 +182,7 @@ def lookup_ip_location(ip: str) -> Dict[str, Any]:
             "latitude": safe_float(result.latitude),
             "longitude": safe_float(result.longitude),
             "zip_code": safe_string(result.zipcode),
-            "time_zone": safe_string(result.timezone),
-            "data_source": "IP2Location LITE (Binary)",
-            "attribution": "This site or product includes IP2Location LITE data available from https://www.ip2location.com"
+            "time_zone": safe_string(result.timezone)
         }
         
     except Exception as e:
