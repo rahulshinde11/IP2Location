@@ -17,8 +17,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Create logs directory
-RUN mkdir -p logs
+# Create non-root user first
+RUN useradd -m -u 1000 appuser
+
+# Create logs directory and set proper ownership
+RUN mkdir -p logs && chown -R appuser:appuser /app
 
 # Set environment variables
 ENV PYTHONPATH=/app
@@ -27,8 +30,7 @@ ENV FLASK_APP=app.py
 # Expose port
 EXPOSE 8080
 
-# Create non-root user
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+# Switch to non-root user
 USER appuser
 
 # Health check
