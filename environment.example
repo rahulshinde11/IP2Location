@@ -9,7 +9,11 @@ DISABLE_API_KEY_AUTH=true
 # Required for downloading commercial databases. For LITE versions, leave empty.
 IP2LOCATION_DOWNLOAD_TOKEN=
 # Specify the database code (e.g., DB1LITE for free, DB26 for commercial)
-IP2LOCATION_DATABASE_CODE=DB1LITE
+IP2LOCATION_DATABASE_CODE=DB11LITEBINIPV6
+
+# ASN Database Configuration
+# Specify the ASN database code for autonomous system number lookups
+IP2LOCATION_ASN_DATABASE_CODE=DBASNLITEBINIPV6
 
 # Service Configuration
 LOG_LEVEL=INFO

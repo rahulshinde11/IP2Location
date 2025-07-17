@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # Python Flask Web Service
   ip2location-api:
@@ -12,6 +10,7 @@ services:
       - API_KEY=${API_KEY}
       - DISABLE_API_KEY_AUTH=${DISABLE_API_KEY_AUTH:-false}
       - IP2LOCATION_DATABASE_PATH=${IP2LOCATION_DATABASE_PATH:-/app/db/IP2LOCATION-LITE-DB1.BIN}
+      - ASN_DATABASE_PATH=${ASN_DATABASE_PATH:-/app/db/IP2LOCATION-LITE-ASN.BIN}
       - ENABLE_CLOUDFLARE_HEADERS=${ENABLE_CLOUDFLARE_HEADERS:-true}
       - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-100}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -23,6 +22,7 @@ services:
       - ./api/logs:/app/logs
     networks:
       - ip2location_network
+      - nginx-proxy
 
   # Database Updater Service (runs daily)
   ip2location-updater:
@@ -55,4 +55,6 @@ services:
 
 networks:
   ip2location_network:
-    driver: bridge 
+    driver: bridge
+  nginx-proxy:
+    external: true

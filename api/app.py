@@ -55,6 +55,7 @@ app.json.indent = 2
 
 # Configuration
 app.config['IP2LOCATION_DATABASE_PATH'] = os.getenv('IP2LOCATION_DATABASE_PATH')
+app.config['ASN_DATABASE_PATH'] = os.getenv('ASN_DATABASE_PATH')
 app.config['API_KEY'] = os.getenv('API_KEY')
 app.config['DISABLE_API_KEY_AUTH'] = os.getenv('DISABLE_API_KEY_AUTH', 'false').lower() == 'true'
 app.config['ENABLE_CLOUDFLARE_HEADERS'] = os.getenv('ENABLE_CLOUDFLARE_HEADERS', 'true').lower() == 'true'
@@ -69,29 +70,47 @@ limiter = Limiter(
     storage_uri=app.config['REDIS_URL']
 )
 
-# Global variable for binary database connection
+# Global variables for database connections
 binary_db = None
+asn_db = None
 
 def init_database():
-    """Initialize binary database connection"""
-    global binary_db
+    """Initialize binary database connections"""
+    global binary_db, asn_db
     
     if not BINARY_SUPPORT:
         logger.error("IP2Location library not available")
         return False
     
+    success = True
+    
+    # Initialize main geolocation database
     binary_path = Path(app.config['IP2LOCATION_DATABASE_PATH'])
     if binary_path.exists():
         try:
             binary_db = IP2Location.IP2Location(str(binary_path))
-            logger.info(f"Binary database initialized: {binary_path}")
-            return True
+            logger.info(f"Geolocation database initialized: {binary_path}")
         except Exception as e:
-            logger.error(f"Failed to initialize binary database: {e}")
-            return False
+            logger.error(f"Failed to initialize geolocation database: {e}")
+            success = False
     else:
-        logger.warning(f"Binary database file not found: {binary_path}")
-        return False
+        logger.warning(f"Geolocation database file not found: {binary_path}")
+        success = False
+    
+    # Initialize ASN database (optional)
+    if app.config['ASN_DATABASE_PATH']:
+        asn_path = Path(app.config['ASN_DATABASE_PATH'])
+        if asn_path.exists():
+            try:
+                asn_db = IP2Location.IP2Location(str(asn_path))
+                logger.info(f"ASN database initialized: {asn_path}")
+            except Exception as e:
+                logger.error(f"Failed to initialize ASN database: {e}")
+                # ASN is optional, don't fail the whole initialization
+        else:
+            logger.warning(f"ASN database file not found: {asn_path}")
+    
+    return success
 
 # Initialize database after app configuration
 if not init_database():
@@ -152,6 +171,42 @@ def validate_api_key() -> bool:
     api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
     return api_key == app.config['API_KEY']
 
+def lookup_asn_info(ip: str) -> Dict[str, Any]:
+    """Lookup ASN information using ASN database"""
+    if not asn_db:
+        return {
+            "asn": None,
+            "as_name": None
+        }
+    
+    try:
+        result = asn_db.get_all(ip)
+        
+        def safe_string(value):
+            if isinstance(value, str) and ("unavailable" in value.lower() or "upgrade" in value.lower() or value in ['-', '']):
+                return None
+            return value if value != '-' else None
+        
+        def safe_int(value):
+            if isinstance(value, str) and ("unavailable" in value.lower() or "upgrade" in value.lower() or value in ['-', '']):
+                return None
+            try:
+                return int(value) if value != 0 and value != '-' else None
+            except (ValueError, TypeError):
+                return None
+        
+        return {
+            "asn": safe_int(result.asn),
+            "as_name": safe_string(result.as_name)
+        }
+        
+    except Exception as e:
+        logger.error(f"ASN database lookup error: {e}")
+        return {
+            "asn": None,
+            "as_name": None
+        }
+
 def lookup_ip_location(ip: str) -> Dict[str, Any]:
     """Lookup IP location using binary database"""
     if not binary_db:
@@ -161,6 +216,9 @@ def lookup_ip_location(ip: str) -> Dict[str, Any]:
         result = binary_db.get_all(ip)
         
         if result.country_short == '-' or result.country_short == 'INVALID IP ADDRESS':
+            # Still try to get ASN info even if geolocation failed
+            asn_info = lookup_asn_info(ip)
+            
             return {
                 "ip": ip,
                 "error": "IP address not found in database",
@@ -171,7 +229,9 @@ def lookup_ip_location(ip: str) -> Dict[str, Any]:
                 "latitude": None,
                 "longitude": None,
                 "zip_code": None,
-                "time_zone": None
+                "time_zone": None,
+                "asn": asn_info["asn"],
+                "as_name": asn_info["as_name"]
             }
         
         # Helper function to safely convert numeric fields
@@ -188,6 +248,9 @@ def lookup_ip_location(ip: str) -> Dict[str, Any]:
                 return None
             return value if value != '-' else None
 
+        # Get ASN information
+        asn_info = lookup_asn_info(ip)
+        
         return {
             "ip": ip,
             "country_code": safe_string(result.country_short),
@@ -197,7 +260,9 @@ def lookup_ip_location(ip: str) -> Dict[str, Any]:
             "latitude": safe_float(result.latitude),
             "longitude": safe_float(result.longitude),
             "zip_code": safe_string(result.zipcode),
-            "time_zone": safe_string(result.timezone)
+            "time_zone": safe_string(result.timezone),
+            "asn": asn_info["asn"],
+            "as_name": asn_info["as_name"]
         }
         
     except Exception as e:
@@ -273,25 +338,45 @@ def root():
 @app.route('/health')
 def health():
     """Health check endpoint"""
-    db_status = "unavailable"
+    geo_db_status = "unavailable"
+    asn_db_status = "unavailable"
     
+    # Test geolocation database
     try:
         if binary_db:
-            # Test binary database with a simple lookup
             test_result = binary_db.get_all("8.8.8.8")
-            db_status = "healthy"
+            geo_db_status = "healthy"
         else:
-            db_status = "not_initialized"
+            geo_db_status = "not_initialized"
     except Exception as e:
-        db_status = f"error: {str(e)}"
+        geo_db_status = f"error: {str(e)}"
+    
+    # Test ASN database
+    try:
+        if asn_db:
+            test_result = asn_db.get_all("8.8.8.8")
+            asn_db_status = "healthy"
+        else:
+            asn_db_status = "not_initialized"
+    except Exception as e:
+        asn_db_status = f"error: {str(e)}"
+    
+    overall_status = "healthy" if geo_db_status == "healthy" else "degraded"
     
     return pretty_json_response({
-        "status": "healthy" if db_status == "healthy" else "degraded",
+        "status": overall_status,
         "timestamp": datetime.utcnow().isoformat(),
-        "database": {
-            "status": db_status,
-            "type": "binary",
-            "path": app.config['IP2LOCATION_DATABASE_PATH']
+        "databases": {
+            "geolocation": {
+                "status": geo_db_status,
+                "type": "binary",
+                "path": app.config['IP2LOCATION_DATABASE_PATH']
+            },
+            "asn": {
+                "status": asn_db_status,
+                "type": "binary",
+                "path": app.config['ASN_DATABASE_PATH']
+            }
         },
         "cloudflare_headers": app.config['ENABLE_CLOUDFLARE_HEADERS'],
         "version": "2.0.0"
@@ -385,6 +470,7 @@ def lookup_batch():
         logger.error(f"Error processing batch lookup: {e}")
         return pretty_json_response({"error": "Internal server error"}, 500)
 
+
 @app.route('/api/v1/info')
 def api_info():
     """API information endpoint"""
@@ -404,7 +490,9 @@ def api_info():
             "rate_limiting": True,
             "api_key_authentication": not app.config['DISABLE_API_KEY_AUTH'],
             "binary_database": True,
-            "microsecond_lookup_times": True
+            "microsecond_lookup_times": True,
+            "asn_lookup": asn_db is not None,
+            "geolocation_lookup": binary_db is not None
         },
         "attribution": "This service uses IP2Location LITE data available from https://www.ip2location.com",
         "client_ip": get_real_ip(),
