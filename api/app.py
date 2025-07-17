@@ -27,13 +27,19 @@ except ImportError:
     exit(1)
 
 # Configure logging
+log_handlers = [logging.StreamHandler()]
+
+# Try to add file handler, but handle permission errors gracefully
+try:
+    os.makedirs('/app/logs', exist_ok=True)
+    log_handlers.append(logging.FileHandler('/app/logs/api.log'))
+except (PermissionError, OSError) as e:
+    print(f"Warning: Could not create log file, using console logging only: {e}")
+
 logging.basicConfig(
     level=os.getenv('LOG_LEVEL', 'INFO'),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('/app/logs/api.log'),
-        logging.StreamHandler()
-    ]
+    handlers=log_handlers
 )
 logger = logging.getLogger(__name__)
 
