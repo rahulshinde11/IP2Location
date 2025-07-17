@@ -6,6 +6,7 @@ Binary format only for optimal performance
 """
 
 import os
+import shutil
 import zipfile
 import hashlib
 import logging
@@ -216,7 +217,7 @@ class IP2LocationUpdater:
             target_path = Path(IP2LOCATION_DATABASE_PATH)
             
             # Move the new binary file to the target location
-            bin_path.rename(target_path)
+            shutil.move(str(bin_path), str(target_path))
             logger.info(f"Binary database updated: {target_path}")
             
             # Log database information
