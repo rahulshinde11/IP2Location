@@ -39,5 +39,9 @@ RUN useradd -m -u 1000 appuser && \
 COPY crontab /tmp/crontab
 RUN crontab -u appuser /tmp/crontab
 
-# Start cron as root (but jobs run as appuser)
-CMD ["cron", "-f"] 
+# Copy startup script and make it executable
+COPY startup.sh /app/startup.sh
+RUN chmod +x /app/startup.sh
+
+# Start with our custom startup script
+CMD ["/app/startup.sh"] 
