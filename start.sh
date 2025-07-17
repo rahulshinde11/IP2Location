@@ -97,7 +97,7 @@ done
 
 # Test API
 echo "🧪 Testing API..."
-response=$(curl -s "http://localhost:8080/api/v1/lookup?api_key=$API_KEY&ip=8.8.8.8")
+response=$(curl -s "http://localhost:8080/?api_key=$API_KEY&ip=8.8.8.8")
 if echo "$response" | grep -q "country_code"; then
     echo "✅ API test successful!"
 else
@@ -112,10 +112,10 @@ echo "📊 Service Status:"
 ${COMPOSE_CMD} ps
 echo ""
 echo "🔗 Access Points:"
+echo "   • Main API:     http://localhost:${API_PORT:-8080}/?ip=8.8.8.8"
 echo "   • Health Check: http://localhost:8080/health"
 echo "   • API Info:     http://localhost:8080/api/v1/info"
-echo "   • Test Lookup:  curl \"http://localhost:${API_PORT:-8080}/api/v1/lookup?api_key=$API_KEY&ip=8.8.8.8\""
-echo "   • Direct API:   http://localhost:${API_PORT:-8080}/ (no reverse proxy)"
+echo "   • Test Lookup:  curl \"http://localhost:${API_PORT:-8080}/?api_key=$API_KEY&ip=8.8.8.8\""
 echo ""
 echo "📋 Your API Key: $API_KEY"
 echo ""

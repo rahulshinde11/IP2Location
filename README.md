@@ -47,9 +47,12 @@ A high-performance IP geolocation service using IP2Location LITE binary database
    # Check service health
    curl http://localhost:8080/health
    
-   # Test API (replace YOUR_API_KEY if you didn't use start.sh)
+   # Test API - Simple lookup (works if DISABLE_API_KEY_AUTH=true)
+   curl "http://localhost:8080/?ip=8.8.8.8"
+   
+   # Test with API key (if authentication is enabled)
    API_KEY=$(grep "^API_KEY=" .env | cut -d'=' -f2)
-   curl "http://localhost:8080/api/v1/lookup?api_key=$API_KEY&ip=8.8.8.8"
+   curl "http://localhost:8080/?api_key=$API_KEY&ip=8.8.8.8"
    ```
 
 ## Architecture
@@ -102,6 +105,25 @@ All API endpoints require an API key via header or query parameter:
 
 ### Endpoints
 
+#### GET `/`
+**Simplified IP lookup endpoint (main endpoint)**
+
+**Parameters:**
+- `ip` (optional): IP address to lookup. If not provided, uses client's real IP
+- `api_key` (optional): Your API key (only required if `DISABLE_API_KEY_AUTH=false`)
+
+**Examples:**
+```bash
+# Lookup your current IP (no API key needed if DISABLE_API_KEY_AUTH=true)
+curl "http://localhost:8080/"
+
+# Lookup specific IP
+curl "http://localhost:8080/?ip=8.8.8.8"
+
+# With API key (when authentication is enabled)
+curl "http://localhost:8080/?ip=8.8.8.8&api_key=YOUR_API_KEY"
+```
+
 #### GET `/health`
 Health check endpoint (no authentication required)
 
@@ -121,11 +143,11 @@ Health check endpoint (no authentication required)
 ```
 
 #### GET `/api/v1/lookup`
-Lookup IP geolocation information
+Legacy endpoint for backward compatibility
 
 **Parameters:**
 - `ip` (optional): IP address to lookup. If not provided, uses client's real IP
-- `api_key`: Your API key
+- `api_key`: Your API key (always required for this endpoint)
 
 **Example:**
 ```bash
@@ -207,6 +229,7 @@ The `IP2LOCATION_DATABASE_CODE` in your `.env` file determines which database to
 |---|---|---|
 | `API_KEY` | (generate) | **Required.** Your secure API key. |
 | `API_PORT` | `8080` | Port to expose the API service on. |
+| `DISABLE_API_KEY_AUTH` | `false` | Set to `true` to disable API key authentication. |
 | `IP2LOCATION_DOWNLOAD_TOKEN` | | **Required for commercial databases.** Your IP2Location download token. |
 | `IP2LOCATION_DATABASE_CODE` | `DB11LITE` | The database code to download (e.g., `DB11LITE`, `DB26`). |
 | `UPDATE_SCHEDULE` | `0 2 * * *` | Cron schedule for database updates. |

@@ -36,9 +36,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration
-IP2LOCATION_DATABASE_PATH = os.getenv('IP2LOCATION_DATABASE_PATH', '/app/db/IP2LOCATION-LITE-DB11.BIN')
+IP2LOCATION_DATABASE_PATH = os.getenv('IP2LOCATION_DATABASE_PATH', '/app/db/IP2LOCATION-LITE-DB1.BIN')
 IP2LOCATION_DOWNLOAD_TOKEN = os.getenv('IP2LOCATION_DOWNLOAD_TOKEN')
-IP2LOCATION_DATABASE_CODE = os.getenv('IP2LOCATION_DATABASE_CODE', 'DB11LITE')
+IP2LOCATION_DATABASE_CODE = os.getenv('IP2LOCATION_DATABASE_CODE', 'DB1LITE')
 BACKUP_ENABLED = os.getenv('BACKUP_ENABLED', 'true').lower() == 'true'
 BACKUP_RETENTION_DAYS = int(os.getenv('BACKUP_RETENTION_DAYS', '7'))
 
@@ -67,13 +67,31 @@ class IP2LocationUpdater:
             # Commercial database URL
             return f"https://www.ip2location.com/download?token={IP2LOCATION_DOWNLOAD_TOKEN}&file={IP2LOCATION_DATABASE_CODE}"
         else:
-            # LITE database URL
-            return f"https://download.ip2location.com/lite/{IP2LOCATION_DATABASE_CODE}.BIN.ZIP"
+            # LITE database URL - convert DB11LITE to IP2LOCATION-LITE-DB11
+            if IP2LOCATION_DATABASE_CODE.endswith('LITE'):
+                # Extract the number from codes like DB11LITE, DB5LITE, etc.
+                db_number = IP2LOCATION_DATABASE_CODE.replace('DB', '').replace('LITE', '')
+                lite_filename = f"IP2LOCATION-LITE-DB{db_number}"
+                return f"https://download.ip2location.com/lite/{lite_filename}.BIN.ZIP"
+            else:
+                # Fallback to original format for non-LITE databases
+                return f"https://download.ip2location.com/lite/{IP2LOCATION_DATABASE_CODE}.BIN.ZIP"
 
     def download_database(self) -> Optional[Path]:
         """Download IP2Location LITE or commercial binary database."""
         url = self.get_download_url()
-        filename = f"{IP2LOCATION_DATABASE_CODE}.ZIP"
+        
+        # Create a proper filename for the download
+        if IP2LOCATION_DOWNLOAD_TOKEN:
+            filename = f"{IP2LOCATION_DATABASE_CODE}.ZIP"
+        else:
+            # For LITE databases, use the proper filename format
+            if IP2LOCATION_DATABASE_CODE.endswith('LITE'):
+                db_number = IP2LOCATION_DATABASE_CODE.replace('DB', '').replace('LITE', '')
+                filename = f"IP2LOCATION-LITE-DB{db_number}.BIN.ZIP"
+            else:
+                filename = f"{IP2LOCATION_DATABASE_CODE}.ZIP"
+        
         download_path = self.download_dir / filename
         
         logger.info(f"Downloading {IP2LOCATION_DATABASE_CODE} from {url.split('?')[0]}")

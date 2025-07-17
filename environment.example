@@ -2,11 +2,14 @@
 API_KEY=your_secure_api_key
 API_PORT=8080
 
+# Authentication Configuration
+DISABLE_API_KEY_AUTH=true
+
 # IP2Location Configuration
 # Required for downloading commercial databases. For LITE versions, leave empty.
 IP2LOCATION_DOWNLOAD_TOKEN=
-# Specify the database code (e.g., DB11LITE, DB26)
-IP2LOCATION_DATABASE_CODE=DB11LITE
+# Specify the database code (e.g., DB1LITE for free, DB26 for commercial)
+IP2LOCATION_DATABASE_CODE=DB1LITE
 
 # Service Configuration
 LOG_LEVEL=INFO

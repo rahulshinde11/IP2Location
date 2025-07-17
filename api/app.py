@@ -44,6 +44,7 @@ CORS(app)
 # Configuration
 app.config['IP2LOCATION_DATABASE_PATH'] = os.getenv('IP2LOCATION_DATABASE_PATH')
 app.config['API_KEY'] = os.getenv('API_KEY')
+app.config['DISABLE_API_KEY_AUTH'] = os.getenv('DISABLE_API_KEY_AUTH', 'false').lower() == 'true'
 app.config['ENABLE_CLOUDFLARE_HEADERS'] = os.getenv('ENABLE_CLOUDFLARE_HEADERS', 'true').lower() == 'true'
 app.config['RATE_LIMIT_PER_MINUTE'] = int(os.getenv('RATE_LIMIT_PER_MINUTE', '100'))
 app.config['REDIS_URL'] = os.getenv('REDIS_URL')
@@ -79,6 +80,12 @@ def init_database():
     else:
         logger.warning(f"Binary database file not found: {binary_path}")
         return False
+
+# Initialize database after app configuration
+if not init_database():
+    logger.error("Failed to initialize the database. The application will not start.")
+    # Don't exit here as this will prevent gunicorn from starting
+    # Instead, the lookup functions will return appropriate errors
 
 def get_real_ip() -> str:
     """
@@ -117,6 +124,10 @@ def get_real_ip() -> str:
 
 def validate_api_key() -> bool:
     """Validate API key from request headers or query parameters"""
+    if app.config['DISABLE_API_KEY_AUTH']:
+        logger.debug("API key authentication is disabled")
+        return True
+
     api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
     return api_key == app.config['API_KEY']
 
@@ -142,16 +153,30 @@ def lookup_ip_location(ip: str) -> Dict[str, Any]:
                 "time_zone": None
             }
         
+        # Helper function to safely convert numeric fields
+        def safe_float(value):
+            if isinstance(value, str) and ("unavailable" in value.lower() or "upgrade" in value.lower()):
+                return None
+            try:
+                return float(value) if value != 0 and value != '-' else None
+            except (ValueError, TypeError):
+                return None
+        
+        def safe_string(value):
+            if isinstance(value, str) and ("unavailable" in value.lower() or "upgrade" in value.lower()):
+                return None
+            return value if value != '-' else None
+
         return {
             "ip": ip,
-            "country_code": result.country_short if result.country_short != '-' else None,
-            "country_name": result.country_long if result.country_long != '-' else None,
-            "region_name": result.region if result.region != '-' else None,
-            "city_name": result.city if result.city != '-' else None,
-            "latitude": float(result.latitude) if result.latitude != 0 else None,
-            "longitude": float(result.longitude) if result.longitude != 0 else None,
-            "zip_code": result.zipcode if result.zipcode != '-' else None,
-            "time_zone": result.timezone if result.timezone != '-' else None,
+            "country_code": safe_string(result.country_short),
+            "country_name": safe_string(result.country_long),
+            "region_name": safe_string(result.region),
+            "city_name": safe_string(result.city),
+            "latitude": safe_float(result.latitude),
+            "longitude": safe_float(result.longitude),
+            "zip_code": safe_string(result.zipcode),
+            "time_zone": safe_string(result.timezone),
             "data_source": "IP2Location LITE (Binary)",
             "attribution": "This site or product includes IP2Location LITE data available from https://www.ip2location.com"
         }
@@ -189,6 +214,42 @@ def after_request(response):
     duration = (datetime.utcnow() - g.start_time).total_seconds()
     logger.info(f"Response to {g.real_ip}: {response.status_code} in {duration:.3f}s")
     return response
+
+@app.route('/')
+@limiter.limit("100 per minute")
+def root():
+    """Simplified IP lookup endpoint"""
+    # Validate API key if authentication is enabled
+    if not app.config['DISABLE_API_KEY_AUTH'] and not validate_api_key():
+        return jsonify({"error": "Invalid or missing API key"}), 401
+    
+    # Get IP address from query parameter or use client IP
+    ip = request.args.get('ip')
+    if not ip:
+        ip = get_real_ip()
+    
+    try:
+        # Validate IP address format
+        ipaddress.ip_address(ip)
+        
+        # Perform lookup
+        result = lookup_ip_location(ip)
+        
+        # Add metadata
+        result.update({
+            "timestamp": datetime.utcnow().isoformat(),
+            "client_ip": get_real_ip(),
+            "queried_ip": ip
+        })
+        
+        return jsonify(result)
+        
+    except ValueError as e:
+        logger.warning(f"Invalid IP address provided: {ip}")
+        return jsonify({"error": f"Invalid IP address: {ip}"}), 400
+    except Exception as e:
+        logger.error(f"Error processing lookup request: {e}")
+        return jsonify({"error": "Internal server error"}), 500
 
 @app.route('/health')
 def health():
@@ -313,6 +374,7 @@ def api_info():
         "version": "2.0.0",
         "database_type": "binary",
         "endpoints": {
+            "/": "Simplified IP lookup",
             "/health": "Health check",
             "/api/v1/lookup": "Single IP lookup",
             "/api/v1/lookup/batch": "Batch IP lookup",
@@ -321,7 +383,7 @@ def api_info():
         "features": {
             "cloudflare_headers": app.config['ENABLE_CLOUDFLARE_HEADERS'],
             "rate_limiting": True,
-            "api_key_authentication": True,
+            "api_key_authentication": not app.config['DISABLE_API_KEY_AUTH'],
             "binary_database": True,
             "microsecond_lookup_times": True
         },
@@ -349,14 +411,10 @@ def internal_error(e):
     }), 500
 
 if __name__ == '__main__':
-    # Initialize database before starting the app
-    if not init_database():
-        logger.error("Failed to initialize the database. The application will not start.")
-        exit(1)
-
     logger.info("Starting IP2Location API service...")
     logger.info(f"Cloudflare headers enabled: {app.config['ENABLE_CLOUDFLARE_HEADERS']}")
     logger.info(f"Rate limit: {app.config['RATE_LIMIT_PER_MINUTE']} requests per minute")
+    logger.info(f"API key authentication enabled: {not app.config['DISABLE_API_KEY_AUTH']}")
     
     app.run(
         host='0.0.0.0',
