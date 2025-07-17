@@ -49,6 +49,9 @@ CORS(app)
 
 # Configure JSON pretty printing
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
+app.json.sort_keys = False
+app.json.ensure_ascii = False
+app.json.indent = 2
 
 # Configuration
 app.config['IP2LOCATION_DATABASE_PATH'] = os.getenv('IP2LOCATION_DATABASE_PATH')
