@@ -176,7 +176,7 @@ def lookup_asn_info(ip: str) -> Dict[str, Any]:
     if not asn_db:
         return {
             "asn": None,
-            "as_name": None
+            "isp": None
         }
     
     try:
@@ -197,14 +197,14 @@ def lookup_asn_info(ip: str) -> Dict[str, Any]:
         
         return {
             "asn": safe_int(result.asn),
-            "as_name": safe_string(result.as_name)
+            "isp": safe_string(result.as_name)
         }
         
     except Exception as e:
         logger.error(f"ASN database lookup error: {e}")
         return {
             "asn": None,
-            "as_name": None
+            "isp": None
         }
 
 def lookup_ip_location(ip: str) -> Dict[str, Any]:
@@ -231,7 +231,7 @@ def lookup_ip_location(ip: str) -> Dict[str, Any]:
                 "zip_code": None,
                 "time_zone": None,
                 "asn": asn_info["asn"],
-                "as_name": asn_info["as_name"]
+                "isp": asn_info["isp"]
             }
         
         # Helper function to safely convert numeric fields
@@ -262,7 +262,7 @@ def lookup_ip_location(ip: str) -> Dict[str, Any]:
             "zip_code": safe_string(result.zipcode),
             "time_zone": safe_string(result.timezone),
             "asn": asn_info["asn"],
-            "as_name": asn_info["as_name"]
+            "isp": asn_info["isp"]
         }
         
     except Exception as e:
