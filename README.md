@@ -8,6 +8,7 @@ A high-performance IP geolocation service using IP2Location LITE binary database
 - **IP2Location LITE Database**: Free geolocation database with country, region, city, coordinates, zip code, and timezone
 - **Cloudflare Integration**: Automatic parsing of Cloudflare headers (`CF-Connecting-IP`, `True-Client-IP`, `X-Forwarded-For`)
 - **Daily Updates**: Automated daily downloads and updates of the IP2Location LITE binary database
+- **Hot Reload**: Automatic detection and reloading of updated database files without service restart
 - **RESTful API**: Clean REST API with rate limiting and API key authentication
 - **Docker Compose**: Simplified containerized setup with Flask API and automated updater
 - **Backup System**: Automatic database backups with configurable retention
@@ -184,6 +185,36 @@ Batch IP lookup (up to 100 IPs)
 }
 ```
 
+#### POST `/api/v1/reload`
+**Manual database reload endpoint**
+
+Forces a check for updated database files and reloads them if changes are detected. Useful for testing or immediate updates without waiting for the next API call.
+
+**Example:**
+```bash
+curl -X POST "http://localhost:8080/api/v1/reload?api_key=YOUR_API_KEY"
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "reloaded": true,
+  "message": "Database reload check completed",
+  "timestamp": "2024-01-15T10:30:00Z",
+  "databases": {
+    "geolocation": {
+      "loaded": true,
+      "mtime": 1705316400.123
+    },
+    "asn": {
+      "loaded": true,
+      "mtime": 1705316400.456
+    }
+  }
+}
+```
+
 #### GET `/api/v1/info`
 API information and documentation
 
@@ -206,6 +237,46 @@ CF-Connecting-IP > True-Client-IP > X-Forwarded-For > X-Real-IP > Remote-Addr
 # Simulate Cloudflare request
 curl -H "CF-Connecting-IP: 203.0.113.1" \
      "http://localhost:8080/api/v1/lookup?api_key=YOUR_API_KEY"
+```
+
+## Hot Reload Feature
+
+The API service automatically detects when the updater service replaces database files and reloads them without requiring a service restart.
+
+### How It Works
+
+1. **File Monitoring**: Each API request checks the modification time of database files
+2. **Automatic Reload**: If a file has been updated, it's automatically reloaded into memory
+3. **Zero Downtime**: Database updates happen seamlessly during regular API operations
+4. **Manual Trigger**: Use the `/api/v1/reload` endpoint to force an immediate check
+
+### Benefits
+
+- **No Service Interruption**: Updates happen without restarting the API service
+- **Immediate Updates**: New database data is available as soon as the updater completes
+- **Automatic Detection**: No manual intervention required for regular updates
+- **Safe Operation**: Failed reloads don't affect the currently loaded database
+
+### Example Workflow
+
+```
+1. Updater downloads new database  → 2:00 AM daily
+2. Updater replaces .bin file     → Atomic file operation  
+3. Next API request detects change → Automatic reload
+4. New data immediately available  → Zero downtime update
+```
+
+### Testing Hot Reload
+
+```bash
+# Check current database info
+curl "http://localhost:8080/api/v1/info?api_key=YOUR_API_KEY"
+
+# Trigger manual reload check
+curl -X POST "http://localhost:8080/api/v1/reload?api_key=YOUR_API_KEY"
+
+# Verify reload occurred
+curl "http://localhost:8080/health"
 ```
 
 ## Database Versions

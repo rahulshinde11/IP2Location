@@ -73,10 +73,50 @@ limiter = Limiter(
 # Global variables for database connections
 binary_db = None
 asn_db = None
+binary_db_mtime = None
+asn_db_mtime = None
+
+def check_and_reload_database():
+    """Check if database files have been updated and reload if necessary"""
+    global binary_db, asn_db, binary_db_mtime, asn_db_mtime
+    
+    if not BINARY_SUPPORT:
+        return False
+    
+    reloaded = False
+    
+    # Check main geolocation database
+    binary_path = Path(app.config['IP2LOCATION_DATABASE_PATH'])
+    if binary_path.exists():
+        current_mtime = binary_path.stat().st_mtime
+        if binary_db_mtime is None or current_mtime != binary_db_mtime:
+            try:
+                binary_db = IP2Location.IP2Location(str(binary_path))
+                binary_db_mtime = current_mtime
+                logger.info(f"Geolocation database reloaded: {binary_path}")
+                reloaded = True
+            except Exception as e:
+                logger.error(f"Failed to reload geolocation database: {e}")
+    
+    # Check ASN database (optional)
+    if app.config['ASN_DATABASE_PATH']:
+        asn_path = Path(app.config['ASN_DATABASE_PATH'])
+        if asn_path.exists():
+            current_mtime = asn_path.stat().st_mtime
+            if asn_db_mtime is None or current_mtime != asn_db_mtime:
+                try:
+                    asn_db = IP2Location.IP2Location(str(asn_path))
+                    asn_db_mtime = current_mtime
+                    logger.info(f"ASN database reloaded: {asn_path}")
+                    reloaded = True
+                except Exception as e:
+                    logger.error(f"Failed to reload ASN database: {e}")
+    
+    return reloaded
 
 def init_database():
     """Initialize binary database connections"""
-    global binary_db, asn_db
+    global binary_db, asn_db, binary_db_mtime, asn_db_mtime
     
     if not BINARY_SUPPORT:
         logger.error("IP2Location library not available")
@@ -89,6 +129,7 @@ def init_database():
     if binary_path.exists():
         try:
             binary_db = IP2Location.IP2Location(str(binary_path))
+            binary_db_mtime = binary_path.stat().st_mtime
             logger.info(f"Geolocation database initialized: {binary_path}")
         except Exception as e:
             logger.error(f"Failed to initialize geolocation database: {e}")
@@ -103,6 +144,7 @@ def init_database():
         if asn_path.exists():
             try:
                 asn_db = IP2Location.IP2Location(str(asn_path))
+                asn_db_mtime = asn_path.stat().st_mtime
                 logger.info(f"ASN database initialized: {asn_path}")
             except Exception as e:
                 logger.error(f"Failed to initialize ASN database: {e}")
@@ -173,6 +215,9 @@ def validate_api_key() -> bool:
 
 def lookup_asn_info(ip: str) -> Dict[str, Any]:
     """Lookup ASN information using ASN database"""
+    # Check for database updates
+    check_and_reload_database()
+    
     if not asn_db:
         return {
             "asn": None,
@@ -209,6 +254,9 @@ def lookup_asn_info(ip: str) -> Dict[str, Any]:
 
 def lookup_ip_location(ip: str) -> Dict[str, Any]:
     """Lookup IP location using binary database"""
+    # Check for database updates
+    check_and_reload_database()
+    
     if not binary_db:
         raise Exception("Binary database not initialized")
     
@@ -471,6 +519,37 @@ def lookup_batch():
         return pretty_json_response({"error": "Internal server error"}, 500)
 
 
+@app.route('/api/v1/reload')
+@limiter.limit("5 per minute")
+def reload_database():
+    """Manually reload database files"""
+    if not validate_api_key():
+        return pretty_json_response({"error": "Invalid or missing API key"}, 401)
+    
+    try:
+        reloaded = check_and_reload_database()
+        
+        return pretty_json_response({
+            "status": "success",
+            "reloaded": reloaded,
+            "message": "Database reload check completed" if reloaded else "No database changes detected",
+            "timestamp": datetime.utcnow().isoformat(),
+            "databases": {
+                "geolocation": {
+                    "loaded": binary_db is not None,
+                    "mtime": binary_db_mtime
+                },
+                "asn": {
+                    "loaded": asn_db is not None,
+                    "mtime": asn_db_mtime
+                }
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Database reload failed: {e}")
+        return pretty_json_response({"error": "Database reload failed"}, 500)
+
 @app.route('/api/v1/info')
 def api_info():
     """API information endpoint"""
@@ -483,6 +562,7 @@ def api_info():
             "/health": "Health check",
             "/api/v1/lookup": "Single IP lookup",
             "/api/v1/lookup/batch": "Batch IP lookup",
+            "/api/v1/reload": "Manual database reload",
             "/api/v1/info": "API information"
         },
         "features": {
@@ -490,6 +570,7 @@ def api_info():
             "rate_limiting": True,
             "api_key_authentication": not app.config['DISABLE_API_KEY_AUTH'],
             "binary_database": True,
+            "hot_reload": True,
             "microsecond_lookup_times": True,
             "asn_lookup": asn_db is not None,
             "geolocation_lookup": binary_db is not None
