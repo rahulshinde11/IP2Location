@@ -139,6 +139,56 @@ The service includes comprehensive proxy detection capabilities using IP2Proxy L
 }
 ```
 
+### **Enhanced Proxy Detection with Nearby IP Analysis**
+
+The service now includes advanced nearby IP analysis for improved proxy detection:
+
+**Features:**
+- **Nearby Range Detection**: When an IP isn't directly in the proxy database, searches nearby IP ranges
+- **Smart Analysis**: Analyzes patterns in nearby proxy ranges to determine likelihood
+- **Confidence Scoring**: Provides confidence levels based on proximity and consistency
+- **Provider Matching**: Identifies proxy providers based on nearby IP patterns
+
+**Configuration (Environment Variables):**
+```bash
+ENABLE_NEARBY_PROXY_DETECTION=true    # Enable nearby IP analysis
+NEARBY_IP_SEARCH_DISTANCE=1000        # Max distance to search for nearby IPs
+NEARBY_IP_MIN_MATCHES=3               # Minimum nearby proxy ranges required
+```
+
+**Enhanced Response Format:**
+```json
+{
+  "proxy": {
+    "is_proxy": true,
+    "proxy_type": "VPN",
+    "proxy_country": "US",
+    "proxy_provider": "Private Internet Access",
+    "detection_method": "nearby_analysis",
+    "confidence": "high",
+    "nearby_analysis": {
+      "total_nearby_ranges": 8,
+      "closest_distance": 247,
+      "proxy_types": {"VPN": 7, "PUB": 1},
+      "providers": {"Private Internet Access": 8},
+      "type_consistency": 0.88,
+      "provider_consistency": 1.0
+    }
+  }
+}
+```
+
+**Detection Methods:**
+- `exact_match`: IP found directly in proxy database (confidence: high)
+- `nearby_analysis`: Based on analysis of nearby proxy ranges (confidence: high/medium/low)
+- `not_found`: No proxy indicators found
+- `error`: Lookup error occurred
+
+**Use Cases:**
+- **VPN Detection**: Catches new VPN server IPs not yet in databases
+- **Proxy Farm Identification**: Detects proxy services using consecutive IP ranges
+- **Threat Analysis**: Identifies suspicious IPs near known malicious ranges
+
 ## Services
 
 ### 1. IP2Location API (`ip2location-api`)

@@ -23,6 +23,14 @@ PROXY_DATABASE_CODE=PX12LITECSVIPV6
 # Proxy database file path (will be set automatically based on code)
 PROXY_DATABASE_PATH=/app/db/IP2PROXY-LITE-PX12.IPV6.CSV
 
+# Enhanced Proxy Detection with Nearby IP Analysis
+# Enable nearby IP analysis for improved proxy detection (true/false)
+ENABLE_NEARBY_PROXY_DETECTION=true
+# Maximum distance to search for nearby IP ranges (higher = broader search)
+NEARBY_IP_SEARCH_DISTANCE=1000
+# Minimum number of nearby proxy ranges required to flag as probable proxy
+NEARBY_IP_MIN_MATCHES=3
+
 # Service Configuration
 LOG_LEVEL=INFO
 ENABLE_CLOUDFLARE_HEADERS=true

@@ -60,6 +60,9 @@ app.config['IP2LOCATION_DATABASE_PATH'] = os.getenv('IP2LOCATION_DATABASE_PATH')
 app.config['ASN_DATABASE_PATH'] = os.getenv('ASN_DATABASE_PATH')
 app.config['PROXY_DATABASE_PATH'] = os.getenv('PROXY_DATABASE_PATH')
 app.config['ENABLE_PROXY_DETECTION'] = os.getenv('ENABLE_PROXY_DETECTION', 'false').lower() == 'true'
+app.config['ENABLE_NEARBY_PROXY_DETECTION'] = os.getenv('ENABLE_NEARBY_PROXY_DETECTION', 'true').lower() == 'true'
+app.config['NEARBY_IP_SEARCH_DISTANCE'] = int(os.getenv('NEARBY_IP_SEARCH_DISTANCE', '1000'))
+app.config['NEARBY_IP_MIN_MATCHES'] = int(os.getenv('NEARBY_IP_MIN_MATCHES', '3'))
 app.config['API_KEY'] = os.getenv('API_KEY')
 app.config['DISABLE_API_KEY_AUTH'] = os.getenv('DISABLE_API_KEY_AUTH', 'false').lower() == 'true'
 app.config['ENABLE_CLOUDFLARE_HEADERS'] = os.getenv('ENABLE_CLOUDFLARE_HEADERS', 'true').lower() == 'true'
@@ -179,7 +182,7 @@ class ProxyLookupEngine:
             self.total_ranges = 0
     
     def lookup(self, ip: str) -> Optional[Dict[str, Any]]:
-        """Lookup proxy information for an IP address using binary search"""
+        """Lookup proxy information for an IP address using binary search with nearby IP detection"""
         if not self.ip_ranges:
             return None
         
@@ -199,7 +202,7 @@ class ProxyLookupEngine:
                 # IPv6 address
                 ip_ints_to_check.append(int(ip_obj))
             
-            # Try each IP representation
+            # Try each IP representation for exact match first
             for ip_int in ip_ints_to_check:
                 # Binary search for the range containing this IP
                 idx = bisect.bisect_right(self.starts, ip_int) - 1
@@ -207,12 +210,142 @@ class ProxyLookupEngine:
                 if idx >= 0 and idx < len(self.ip_ranges):
                     ip_start, ip_end, proxy_data = self.ip_ranges[idx]
                     if ip_start <= ip_int <= ip_end:
+                        # Exact match found
+                        proxy_data['detection_method'] = 'exact_match'
+                        proxy_data['confidence'] = 'high'
                         return proxy_data
+            
+            # If no exact match and nearby detection is enabled, check nearby IPs
+            if app.config.get('ENABLE_NEARBY_PROXY_DETECTION', True):
+                return self._check_nearby_proxies(ip_ints_to_check)
+            
             return None
             
         except Exception as e:
             logger.error(f"Proxy lookup error for {ip}: {e}")
             return None
+    
+    def _check_nearby_proxies(self, ip_ints_to_check: List[int]) -> Optional[Dict[str, Any]]:
+        """Check for proxy indicators in nearby IP ranges"""
+        search_distance = app.config.get('NEARBY_IP_SEARCH_DISTANCE', 1000)
+        min_matches = app.config.get('NEARBY_IP_MIN_MATCHES', 3)
+        
+        for ip_int in ip_ints_to_check:
+            nearby_proxies = []
+            nearby_ranges = []
+            
+            # Find the insertion point for binary search
+            idx = bisect.bisect_left(self.starts, ip_int)
+            
+            # Check ranges before the target IP
+            for i in range(max(0, idx - 50), idx):
+                ip_start, ip_end, proxy_data = self.ip_ranges[i]
+                
+                # Calculate distance from our target IP
+                distance = abs(ip_int - ip_end)
+                if distance <= search_distance:
+                    nearby_ranges.append({
+                        'distance': distance,
+                        'data': proxy_data,
+                        'range_start': ip_start,
+                        'range_end': ip_end
+                    })
+                    nearby_proxies.append(proxy_data)
+            
+            # Check ranges after the target IP
+            for i in range(idx, min(len(self.ip_ranges), idx + 50)):
+                ip_start, ip_end, proxy_data = self.ip_ranges[i]
+                
+                # Calculate distance from our target IP
+                distance = abs(ip_start - ip_int)
+                if distance <= search_distance:
+                    nearby_ranges.append({
+                        'distance': distance,
+                        'data': proxy_data,
+                        'range_start': ip_start,
+                        'range_end': ip_end
+                    })
+                    nearby_proxies.append(proxy_data)
+            
+            # Analyze nearby proxy patterns
+            if len(nearby_proxies) >= min_matches:
+                return self._analyze_nearby_proxies(nearby_proxies, nearby_ranges, ip_int)
+        
+        return None
+    
+    def _analyze_nearby_proxies(self, nearby_proxies: List[Dict], nearby_ranges: List[Dict], target_ip: int) -> Dict[str, Any]:
+        """Analyze nearby proxy data to determine if target IP is likely a proxy"""
+        # Count proxy types and providers
+        proxy_types = {}
+        providers = {}
+        countries = {}
+        
+        closest_range = None
+        min_distance = float('inf')
+        
+        for range_info in nearby_ranges:
+            proxy_data = range_info['data']
+            distance = range_info['distance']
+            
+            # Track the closest range
+            if distance < min_distance:
+                min_distance = distance
+                closest_range = range_info
+            
+            # Count occurrences
+            proxy_type = proxy_data.get('proxy_type', 'Unknown')
+            provider = proxy_data.get('provider', proxy_data.get('isp', 'Unknown'))
+            country = proxy_data.get('country_code', 'Unknown')
+            
+            proxy_types[proxy_type] = proxy_types.get(proxy_type, 0) + 1
+            providers[provider] = providers.get(provider, 0) + 1
+            countries[country] = countries.get(country, 0) + 1
+        
+        # Find most common attributes
+        most_common_type = max(proxy_types.items(), key=lambda x: x[1])[0]
+        most_common_provider = max(providers.items(), key=lambda x: x[1])[0]
+        most_common_country = max(countries.items(), key=lambda x: x[1])[0]
+        
+        # Determine confidence based on consistency and proximity
+        total_nearby = len(nearby_proxies)
+        type_consistency = proxy_types[most_common_type] / total_nearby
+        provider_consistency = providers[most_common_provider] / total_nearby
+        
+        # Calculate confidence score
+        if min_distance <= 100 and type_consistency >= 0.8 and provider_consistency >= 0.8:
+            confidence = 'high'
+        elif min_distance <= 500 and type_consistency >= 0.6 and provider_consistency >= 0.6:
+            confidence = 'medium'
+        else:
+            confidence = 'low'
+        
+        # Create response based on closest range but with aggregated data
+        result = {
+            'proxy_type': most_common_type,
+            'country_code': most_common_country,
+            'country_name': closest_range['data'].get('country_name', ''),
+            'provider': most_common_provider,
+            'detection_method': 'nearby_analysis',
+            'confidence': confidence,
+            'nearby_analysis': {
+                'total_nearby_ranges': total_nearby,
+                'closest_distance': min_distance,
+                'proxy_types': proxy_types,
+                'providers': providers,
+                'countries': countries,
+                'type_consistency': round(type_consistency, 2),
+                'provider_consistency': round(provider_consistency, 2)
+            }
+        }
+        
+        # Add optional fields from closest range
+        if closest_range and closest_range['data']:
+            closest_data = closest_range['data']
+            for field in ['region_name', 'city_name', 'isp', 'domain', 'usage_type', 'asn', 'last_seen', 'threat', 'residential', 'fraud_score']:
+                if closest_data.get(field):
+                    result[field] = closest_data[field]
+        
+        return result
     
     def get_stats(self) -> Dict[str, Any]:
         """Get proxy database statistics"""
@@ -447,7 +580,7 @@ def lookup_asn_info(ip: str) -> Dict[str, Any]:
         }
 
 def lookup_proxy_info(ip: str) -> Dict[str, Any]:
-    """Lookup proxy information using CSV database"""
+    """Lookup proxy information using CSV database with nearby IP detection"""
     # Check for database updates
     check_and_reload_database()
     
@@ -468,6 +601,8 @@ def lookup_proxy_info(ip: str) -> Dict[str, Any]:
                 "proxy_type": result.get('proxy_type'),
                 "proxy_country": result.get('country_code'),
                 "proxy_country_name": result.get('country_name'),
+                "detection_method": result.get('detection_method', 'exact_match'),
+                "confidence": result.get('confidence', 'high')
             }
             
             # Add optional fields if available
@@ -494,12 +629,18 @@ def lookup_proxy_info(ip: str) -> Dict[str, Any]:
             if result.get('fraud_score'):
                 proxy_response["proxy_fraud_score"] = result.get('fraud_score')
             
+            # Add nearby analysis data if available
+            if result.get('nearby_analysis'):
+                proxy_response["nearby_analysis"] = result.get('nearby_analysis')
+            
             return proxy_response
         else:
             return {
                 "is_proxy": False,
                 "proxy_type": None,
-                "proxy_country": None
+                "proxy_country": None,
+                "detection_method": "not_found",
+                "confidence": None
             }
         
     except Exception as e:
@@ -507,7 +648,9 @@ def lookup_proxy_info(ip: str) -> Dict[str, Any]:
         return {
             "is_proxy": False,
             "proxy_type": None,
-            "proxy_country": None
+            "proxy_country": None,
+            "detection_method": "error",
+            "confidence": None
         }
 
 def lookup_ip_location(ip: str) -> Dict[str, Any]:
@@ -714,7 +857,7 @@ def health():
             }
         },
         "cloudflare_headers": app.config['ENABLE_CLOUDFLARE_HEADERS'],
-        "version": "2.0.0"
+        "version": "2.1.0"
     }
     
     # Add proxy statistics if available
@@ -853,7 +996,7 @@ def api_info():
     """API information endpoint"""
     return pretty_json_response({
         "service": "IP2Location LITE API",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "database_type": "binary",
         "endpoints": {
             "/": "Simplified IP lookup",
@@ -872,7 +1015,10 @@ def api_info():
             "microsecond_lookup_times": True,
             "asn_lookup": asn_db is not None,
             "geolocation_lookup": binary_db is not None,
-            "proxy_detection": app.config['ENABLE_PROXY_DETECTION'] and proxy_lookup_engine is not None
+            "proxy_detection": app.config['ENABLE_PROXY_DETECTION'] and proxy_lookup_engine is not None,
+            "nearby_proxy_detection": app.config.get('ENABLE_NEARBY_PROXY_DETECTION', True),
+            "nearby_ip_search_distance": app.config.get('NEARBY_IP_SEARCH_DISTANCE', 1000),
+            "nearby_ip_min_matches": app.config.get('NEARBY_IP_MIN_MATCHES', 3)
         },
         "attribution": "This service uses IP2Location LITE data available from https://www.ip2location.com",
         "client_ip": get_real_ip(),
