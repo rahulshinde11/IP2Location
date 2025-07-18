@@ -8,8 +8,10 @@ import os
 import json
 import logging
 import ipaddress
+import csv
+import bisect
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
 
 from flask import Flask, request, jsonify, g, Response
@@ -56,6 +58,8 @@ app.json.indent = 2
 # Configuration
 app.config['IP2LOCATION_DATABASE_PATH'] = os.getenv('IP2LOCATION_DATABASE_PATH')
 app.config['ASN_DATABASE_PATH'] = os.getenv('ASN_DATABASE_PATH')
+app.config['PROXY_DATABASE_PATH'] = os.getenv('PROXY_DATABASE_PATH')
+app.config['ENABLE_PROXY_DETECTION'] = os.getenv('ENABLE_PROXY_DETECTION', 'false').lower() == 'true'
 app.config['API_KEY'] = os.getenv('API_KEY')
 app.config['DISABLE_API_KEY_AUTH'] = os.getenv('DISABLE_API_KEY_AUTH', 'false').lower() == 'true'
 app.config['ENABLE_CLOUDFLARE_HEADERS'] = os.getenv('ENABLE_CLOUDFLARE_HEADERS', 'true').lower() == 'true'
@@ -76,9 +80,171 @@ asn_db = None
 binary_db_mtime = None
 asn_db_mtime = None
 
+# Global variables for proxy database
+proxy_lookup_engine = None
+proxy_db_mtime = None
+
+class ProxyLookupEngine:
+    """High-performance CSV-based proxy lookup engine using in-memory IP ranges"""
+    
+    def __init__(self, csv_path: str):
+        self.csv_path = csv_path
+        self.ip_ranges = []  # List of (ip_start_int, ip_end_int, proxy_data)
+        self.starts = []     # Sorted list of start IPs for binary search
+        self.headers = []
+        self.total_ranges = 0
+        self.load_csv()
+    
+    def ip_to_int(self, ip_str: str) -> int:
+        """Convert IP address string to integer for range comparison"""
+        try:
+            ip_obj = ipaddress.ip_address(ip_str)
+            if isinstance(ip_obj, ipaddress.IPv4Address):
+                return int(ip_obj)
+            elif isinstance(ip_obj, ipaddress.IPv6Address):
+                return int(ip_obj)
+            else:
+                return 0
+        except ValueError:
+            return 0
+    
+    def load_csv(self):
+        """Load proxy database CSV into memory with optimized data structures"""
+        logger.info(f"Loading proxy database from {self.csv_path}")
+        start_time = datetime.utcnow()
+        
+        try:
+            with open(self.csv_path, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                # IP2Proxy CSV files don't have headers, start directly with data
+                self.headers = []  # We'll detect the number of fields from the first row
+                
+                ranges = []
+                for row in reader:
+                    if len(row) >= 4:  # Minimum: ip_from, ip_to, country_code, country_name
+                        # Set headers from first row if not set yet
+                        if not self.headers:
+                            self.headers = [f'field_{i}' for i in range(len(row))]
+                            
+                        ip_from = int(row[0].strip('"'))
+                        ip_to = int(row[1].strip('"'))
+                        
+                        # Create proxy data dictionary based on available fields
+                        # IP2Proxy CSV format: ip_from, ip_to, proxy_type, country_code, country_name, region, city, isp, domain, usage_type, asn, last_seen, threat, residential, provider, fraud_score
+                        proxy_data = {
+                            'proxy_type': row[2].strip('"') if len(row) > 2 else None,
+                            'country_code': row[3].strip('"') if len(row) > 3 else None,
+                            'country_name': row[4].strip('"') if len(row) > 4 else None,
+                        }
+                        
+                        # Add additional fields based on database level
+                        if len(row) > 5:
+                            proxy_data['region_name'] = row[5].strip('"') if len(row) > 5 else None
+                        if len(row) > 6:
+                            proxy_data['city_name'] = row[6].strip('"') if len(row) > 6 else None
+                        if len(row) > 7:
+                            proxy_data['isp'] = row[7].strip('"') if len(row) > 7 else None
+                        if len(row) > 8:
+                            proxy_data['domain'] = row[8].strip('"') if len(row) > 8 else None
+                        if len(row) > 9:
+                            proxy_data['usage_type'] = row[9].strip('"') if len(row) > 9 else None
+                        if len(row) > 10:
+                            proxy_data['asn'] = row[10].strip('"') if len(row) > 10 else None
+                        if len(row) > 11:
+                            proxy_data['last_seen'] = row[11].strip('"') if len(row) > 11 else None
+                        if len(row) > 12:
+                            proxy_data['threat'] = row[12].strip('"') if len(row) > 12 else None
+                        if len(row) > 13:
+                            proxy_data['residential'] = row[13].strip('"') if len(row) > 13 else None
+                        if len(row) > 14:
+                            proxy_data['provider'] = row[14].strip('"') if len(row) > 14 else None
+                        if len(row) > 15:
+                            proxy_data['fraud_score'] = row[15].strip('"') if len(row) > 15 else None
+                        
+                        ranges.append((ip_from, ip_to, proxy_data))
+                
+                # Sort ranges by start IP for binary search optimization
+                ranges.sort(key=lambda x: x[0])
+                self.ip_ranges = ranges
+                self.starts = [r[0] for r in ranges]
+                self.total_ranges = len(ranges)
+                
+                load_time = (datetime.utcnow() - start_time).total_seconds()
+                logger.info(f"Proxy database loaded: {self.total_ranges:,} ranges in {load_time:.2f}s")
+                
+        except Exception as e:
+            logger.error(f"Failed to load proxy database: {e}")
+            self.ip_ranges = []
+            self.starts = []
+            self.total_ranges = 0
+    
+    def lookup(self, ip: str) -> Optional[Dict[str, Any]]:
+        """Lookup proxy information for an IP address using binary search"""
+        if not self.ip_ranges:
+            return None
+        
+        try:
+            ip_obj = ipaddress.ip_address(ip)
+            
+            # For IPv4 addresses, also check IPv4-mapped IPv6 format
+            ip_ints_to_check = []
+            
+            if isinstance(ip_obj, ipaddress.IPv4Address):
+                # Add both IPv4 and IPv4-mapped IPv6 representations
+                ip_ints_to_check.append(int(ip_obj))
+                # Create IPv4-mapped IPv6 version
+                ipv6_mapped = ipaddress.ip_address(f"::ffff:{ip}")
+                ip_ints_to_check.append(int(ipv6_mapped))
+            else:
+                # IPv6 address
+                ip_ints_to_check.append(int(ip_obj))
+            
+            # Try each IP representation
+            for ip_int in ip_ints_to_check:
+                # Binary search for the range containing this IP
+                idx = bisect.bisect_right(self.starts, ip_int) - 1
+                
+                if idx >= 0 and idx < len(self.ip_ranges):
+                    ip_start, ip_end, proxy_data = self.ip_ranges[idx]
+                    if ip_start <= ip_int <= ip_end:
+                        return proxy_data
+            return None
+            
+        except Exception as e:
+            logger.error(f"Proxy lookup error for {ip}: {e}")
+            return None
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get proxy database statistics"""
+        return {
+            'total_ranges': self.total_ranges,
+            'database_path': self.csv_path,
+            'headers': self.headers,
+            'database_level': self.detect_database_level()
+        }
+    
+    def detect_database_level(self) -> str:
+        """Auto-detect proxy database level from headers"""
+        field_count = len(self.headers)
+        level_map = {
+            4: 'PX1',   # country
+            5: 'PX2',   # + proxy_type
+            7: 'PX3',   # + region, city
+            8: 'PX4',   # + isp
+            9: 'PX5',   # + domain
+            10: 'PX6',  # + usage_type
+            11: 'PX7',  # + asn
+            12: 'PX8',  # + last_seen
+            13: 'PX9',  # + threat
+            14: 'PX10', # + residential
+            15: 'PX11', # + provider
+            16: 'PX12', # + fraud_score
+        }
+        return level_map.get(field_count, f'Unknown({field_count} fields)')
+
 def check_and_reload_database():
     """Check if database files have been updated and reload if necessary"""
-    global binary_db, asn_db, binary_db_mtime, asn_db_mtime
+    global binary_db, asn_db, binary_db_mtime, asn_db_mtime, proxy_lookup_engine, proxy_db_mtime
     
     if not BINARY_SUPPORT:
         return False
@@ -112,11 +278,25 @@ def check_and_reload_database():
                 except Exception as e:
                     logger.error(f"Failed to reload ASN database: {e}")
     
+    # Check proxy database (optional)
+    if app.config['ENABLE_PROXY_DETECTION'] and app.config['PROXY_DATABASE_PATH']:
+        proxy_path = Path(app.config['PROXY_DATABASE_PATH'])
+        if proxy_path.exists():
+            current_mtime = proxy_path.stat().st_mtime
+            if proxy_db_mtime is None or current_mtime != proxy_db_mtime:
+                try:
+                    proxy_lookup_engine = ProxyLookupEngine(str(proxy_path))
+                    proxy_db_mtime = current_mtime
+                    logger.info(f"Proxy database reloaded: {proxy_path}")
+                    reloaded = True
+                except Exception as e:
+                    logger.error(f"Failed to reload proxy database: {e}")
+    
     return reloaded
 
 def init_database():
     """Initialize binary database connections"""
-    global binary_db, asn_db, binary_db_mtime, asn_db_mtime
+    global binary_db, asn_db, binary_db_mtime, asn_db_mtime, proxy_lookup_engine, proxy_db_mtime
     
     if not BINARY_SUPPORT:
         logger.error("IP2Location library not available")
@@ -151,6 +331,20 @@ def init_database():
                 # ASN is optional, don't fail the whole initialization
         else:
             logger.warning(f"ASN database file not found: {asn_path}")
+    
+    # Initialize proxy database (optional)
+    if app.config['ENABLE_PROXY_DETECTION'] and app.config['PROXY_DATABASE_PATH']:
+        proxy_path = Path(app.config['PROXY_DATABASE_PATH'])
+        if proxy_path.exists():
+            try:
+                proxy_lookup_engine = ProxyLookupEngine(str(proxy_path))
+                proxy_db_mtime = proxy_path.stat().st_mtime
+                logger.info(f"Proxy database initialized: {proxy_path}")
+            except Exception as e:
+                logger.error(f"Failed to initialize proxy database: {e}")
+                # Proxy is optional, don't fail the whole initialization
+        else:
+            logger.warning(f"Proxy database file not found: {proxy_path}")
     
     return success
 
@@ -252,6 +446,70 @@ def lookup_asn_info(ip: str) -> Dict[str, Any]:
             "isp": None
         }
 
+def lookup_proxy_info(ip: str) -> Dict[str, Any]:
+    """Lookup proxy information using CSV database"""
+    # Check for database updates
+    check_and_reload_database()
+    
+    if not app.config['ENABLE_PROXY_DETECTION'] or not proxy_lookup_engine:
+        return {
+            "is_proxy": False,
+            "proxy_type": None,
+            "proxy_country": None
+        }
+    
+    try:
+        result = proxy_lookup_engine.lookup(ip)
+        
+        if result:
+            # Format proxy response based on available data
+            proxy_response = {
+                "is_proxy": True,
+                "proxy_type": result.get('proxy_type'),
+                "proxy_country": result.get('country_code'),
+                "proxy_country_name": result.get('country_name'),
+            }
+            
+            # Add optional fields if available
+            if result.get('region_name'):
+                proxy_response["proxy_region"] = result.get('region_name')
+            if result.get('city_name'):
+                proxy_response["proxy_city"] = result.get('city_name')
+            if result.get('isp'):
+                proxy_response["proxy_isp"] = result.get('isp')
+            if result.get('domain'):
+                proxy_response["proxy_domain"] = result.get('domain')
+            if result.get('usage_type'):
+                proxy_response["proxy_usage_type"] = result.get('usage_type')
+            if result.get('asn'):
+                proxy_response["proxy_asn"] = result.get('asn')
+            if result.get('last_seen'):
+                proxy_response["proxy_last_seen"] = result.get('last_seen')
+            if result.get('threat'):
+                proxy_response["proxy_threat"] = result.get('threat')
+            if result.get('residential'):
+                proxy_response["proxy_residential"] = result.get('residential')
+            if result.get('provider'):
+                proxy_response["proxy_provider"] = result.get('provider')
+            if result.get('fraud_score'):
+                proxy_response["proxy_fraud_score"] = result.get('fraud_score')
+            
+            return proxy_response
+        else:
+            return {
+                "is_proxy": False,
+                "proxy_type": None,
+                "proxy_country": None
+            }
+        
+    except Exception as e:
+        logger.error(f"Proxy database lookup error: {e}")
+        return {
+            "is_proxy": False,
+            "proxy_type": None,
+            "proxy_country": None
+        }
+
 def lookup_ip_location(ip: str) -> Dict[str, Any]:
     """Lookup IP location using binary database"""
     # Check for database updates
@@ -264,8 +522,9 @@ def lookup_ip_location(ip: str) -> Dict[str, Any]:
         result = binary_db.get_all(ip)
         
         if result.country_short == '-' or result.country_short == 'INVALID IP ADDRESS':
-            # Still try to get ASN info even if geolocation failed
+            # Still try to get ASN and proxy info even if geolocation failed
             asn_info = lookup_asn_info(ip)
+            proxy_info = lookup_proxy_info(ip)
             
             return {
                 "ip": ip,
@@ -279,7 +538,8 @@ def lookup_ip_location(ip: str) -> Dict[str, Any]:
                 "zip_code": None,
                 "time_zone": None,
                 "asn": asn_info["asn"],
-                "isp": asn_info["isp"]
+                "isp": asn_info["isp"],
+                "proxy": proxy_info
             }
         
         # Helper function to safely convert numeric fields
@@ -299,6 +559,9 @@ def lookup_ip_location(ip: str) -> Dict[str, Any]:
         # Get ASN information
         asn_info = lookup_asn_info(ip)
         
+        # Get proxy information
+        proxy_info = lookup_proxy_info(ip)
+        
         return {
             "ip": ip,
             "country_code": safe_string(result.country_short),
@@ -310,7 +573,8 @@ def lookup_ip_location(ip: str) -> Dict[str, Any]:
             "zip_code": safe_string(result.zipcode),
             "time_zone": safe_string(result.timezone),
             "asn": asn_info["asn"],
-            "isp": asn_info["isp"]
+            "isp": asn_info["isp"],
+            "proxy": proxy_info
         }
         
     except Exception as e:
@@ -388,6 +652,7 @@ def health():
     """Health check endpoint"""
     geo_db_status = "unavailable"
     asn_db_status = "unavailable"
+    proxy_db_status = "unavailable"
     
     # Test geolocation database
     try:
@@ -409,9 +674,25 @@ def health():
     except Exception as e:
         asn_db_status = f"error: {str(e)}"
     
+    # Test proxy database
+    try:
+        if app.config['ENABLE_PROXY_DETECTION'] and proxy_lookup_engine:
+            test_result = proxy_lookup_engine.lookup("8.8.8.8")
+            proxy_db_status = "healthy"
+            proxy_stats = proxy_lookup_engine.get_stats()
+        elif not app.config['ENABLE_PROXY_DETECTION']:
+            proxy_db_status = "disabled"
+            proxy_stats = None
+        else:
+            proxy_db_status = "not_initialized"
+            proxy_stats = None
+    except Exception as e:
+        proxy_db_status = f"error: {str(e)}"
+        proxy_stats = None
+    
     overall_status = "healthy" if geo_db_status == "healthy" else "degraded"
     
-    return pretty_json_response({
+    health_response = {
         "status": overall_status,
         "timestamp": datetime.utcnow().isoformat(),
         "databases": {
@@ -424,11 +705,23 @@ def health():
                 "status": asn_db_status,
                 "type": "binary",
                 "path": app.config['ASN_DATABASE_PATH']
+            },
+            "proxy": {
+                "status": proxy_db_status,
+                "type": "csv",
+                "path": app.config['PROXY_DATABASE_PATH'],
+                "enabled": app.config['ENABLE_PROXY_DETECTION']
             }
         },
         "cloudflare_headers": app.config['ENABLE_CLOUDFLARE_HEADERS'],
         "version": "2.0.0"
-    })
+    }
+    
+    # Add proxy statistics if available
+    if proxy_stats:
+        health_response["databases"]["proxy"]["stats"] = proxy_stats
+    
+    return pretty_json_response(health_response)
 
 @app.route('/api/v1/lookup')
 @limiter.limit("50 per minute")
@@ -542,6 +835,11 @@ def reload_database():
                 "asn": {
                     "loaded": asn_db is not None,
                     "mtime": asn_db_mtime
+                },
+                "proxy": {
+                    "loaded": proxy_lookup_engine is not None,
+                    "mtime": proxy_db_mtime,
+                    "enabled": app.config['ENABLE_PROXY_DETECTION']
                 }
             }
         })
@@ -573,7 +871,8 @@ def api_info():
             "hot_reload": True,
             "microsecond_lookup_times": True,
             "asn_lookup": asn_db is not None,
-            "geolocation_lookup": binary_db is not None
+            "geolocation_lookup": binary_db is not None,
+            "proxy_detection": app.config['ENABLE_PROXY_DETECTION'] and proxy_lookup_engine is not None
         },
         "attribution": "This service uses IP2Location LITE data available from https://www.ip2location.com",
         "client_ip": get_real_ip(),

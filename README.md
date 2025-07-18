@@ -6,14 +6,15 @@ A high-performance IP geolocation service using IP2Location LITE binary database
 
 - **High-Performance Binary Database**: Ultra-fast IP2Location LITE binary format for microsecond lookups
 - **IP2Location LITE Database**: Free geolocation database with country, region, city, coordinates, zip code, and timezone
+- **Proxy Detection**: CSV-based IP2Proxy LITE database for detecting open proxies, VPNs, and proxy types
 - **Cloudflare Integration**: Automatic parsing of Cloudflare headers (`CF-Connecting-IP`, `True-Client-IP`, `X-Forwarded-For`)
-- **Daily Updates**: Automated daily downloads and updates of the IP2Location LITE binary database
+- **Daily Updates**: Automated daily downloads and updates of both geolocation and proxy databases
 - **Hot Reload**: Automatic detection and reloading of updated database files without service restart
 - **RESTful API**: Clean REST API with rate limiting and API key authentication
 - **Docker Compose**: Simplified containerized setup with Flask API and automated updater
 - **Backup System**: Automatic database backups with configurable retention
 - **Lightweight**: No reverse proxy needed - designed for Cloudflare deployment
-- **Ultra-Fast Performance**: Microsecond lookup times with binary database format
+- **Ultra-Fast Performance**: Microsecond lookup times with optimized in-memory data structures
 
 ## Quick Start
 
@@ -36,6 +37,10 @@ A high-performance IP geolocation service using IP2Location LITE binary database
    # IP2Location Configuration
    IP2LOCATION_DOWNLOAD_TOKEN= # For commercial databases
    IP2LOCATION_DATABASE_CODE=DB11LITE # e.g., DB11LITE, DB26
+
+   # Proxy Detection Configuration
+   ENABLE_PROXY_DETECTION=true
+   PROXY_DATABASE_CODE=PX12LITECSVIPV6 # e.g., PX1LITE, PX12LITECSVIPV6
    ```
 
 3. **Start Services**
@@ -59,13 +64,13 @@ A high-performance IP geolocation service using IP2Location LITE binary database
 ## Architecture
 
 ```
-┌─────────────────┐    ┌─────────────────┐
-│                 │    │                 │
-│   Flask API     │───▶│  Binary Database│
-│   (Python)      │    │  (.bin format)  │
-│   Port 8080     │    │   (./db/)       │
-│                 │    │                 │
-└─────────────────┘    └─────────────────┘
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│                 │    │                 │    │                 │
+│   Flask API     │───▶│  Binary Database│    │   CSV Database  │
+│   (Python)      │    │  (.bin format)  │    │  (.csv format)  │
+│   Port 8080     │    │   (./db/)       │    │   (./db/)       │
+│                 │    │ Geolocation+ASN │    │ Proxy Detection │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
          │
          ▼
 ┌─────────────────┐
@@ -74,6 +79,64 @@ A high-performance IP geolocation service using IP2Location LITE binary database
 │   (Daily Cron)  │
 │                 │
 └─────────────────┘
+```
+
+## Proxy Detection
+
+The service includes comprehensive proxy detection capabilities using IP2Proxy LITE databases:
+
+### **Supported Database Levels**
+
+| Database Code | Fields Available | Use Case |
+|---|---|---|
+| `PX1LITE` | Country | Basic proxy detection |
+| `PX2LITE` | Country + Proxy Type | Identify proxy types (PUB, VPN) |
+| `PX3LITE` | + Region + City | Geographic proxy analysis |
+| `PX4LITE` | + ISP | ISP-based filtering |
+| `PX8LITE` | + Last Seen | Temporal analysis |
+| `PX12LITE` or `PX12LITECSVIPV6` | + Threat + Residential + Provider + Fraud Score | Complete proxy analysis with fraud detection |
+
+### **Database Format**
+- **Type**: CSV (Comma-Separated Values)
+- **IP Support**: IPv4 and IPv6 (use codes ending with IPV6 for combined datasets)
+- **Performance**: In-memory binary search on IP ranges (~100μs lookups)
+- **Size**: ~50-100MB memory usage depending on database level
+- **Updates**: Bi-weekly for LITE, daily for commercial versions
+
+### **Proxy Response Format**
+
+**For Non-Proxy IPs:**
+```json
+{
+  "proxy": {
+    "is_proxy": false,
+    "proxy_type": null,
+    "proxy_country": null
+  }
+}
+```
+
+**For Proxy IPs (PX12 Full Response):**
+```json
+{
+  "proxy": {
+    "is_proxy": true,
+    "proxy_type": "PUB",
+    "proxy_country": "US",
+    "proxy_country_name": "United States",
+    "proxy_region": "California",
+    "proxy_city": "Los Angeles",
+    "proxy_isp": "ProxyService Inc",
+    "proxy_domain": "example-proxy.com",
+    "proxy_usage_type": "COM",
+    "proxy_asn": "64512",
+    "proxy_last_seen": "2024-01-15",
+    "proxy_threat": "SAFE",
+    "proxy_residential": "Yes",
+    "proxy_provider": "ExampleVPN",
+    "proxy_fraud_score": "25"
+  }
+}
 ```
 
 ## Services
@@ -167,8 +230,13 @@ curl "http://localhost:8080/api/v1/lookup?api_key=YOUR_API_KEY&ip=8.8.8.8"
   "longitude": -122.083847,
   "zip_code": "94035",
   "time_zone": "-08:00",
-  "data_source": "IP2Location LITE (Binary)",
-  "attribution": "This site or product includes IP2Location LITE data available from https://www.ip2location.com",
+  "asn": 15169,
+  "isp": "Google LLC",
+  "proxy": {
+    "is_proxy": false,
+    "proxy_type": null,
+    "proxy_country": null
+  },
   "timestamp": "2024-01-15T10:30:00Z",
   "client_ip": "203.0.113.1",
   "queried_ip": "8.8.8.8"
@@ -303,6 +371,9 @@ The `IP2LOCATION_DATABASE_CODE` in your `.env` file determines which database to
 | `DISABLE_API_KEY_AUTH` | `false` | Set to `true` to disable API key authentication. |
 | `IP2LOCATION_DOWNLOAD_TOKEN` | | **Required for commercial databases.** Your IP2Location download token. |
 | `IP2LOCATION_DATABASE_CODE` | `DB11LITE` | The database code to download (e.g., `DB11LITE`, `DB26`). |
+| `ENABLE_PROXY_DETECTION` | `false` | Enable proxy detection using CSV database. |
+| `PROXY_DATABASE_CODE` | `PX12LITECSVIPV6` | The proxy database code to download (e.g., `PX1LITE`, `PX12LITECSVIPV6`). |
+| `PROXY_DATABASE_PATH` | `/app/db/IP2PROXY-LITE-PX12.IPV6.CSV` | Path to the proxy CSV database file. |
 | `UPDATE_SCHEDULE` | `0 2 * * *` | Cron schedule for database updates. |
 | `BACKUP_ENABLED` | `true` | Enable automatic database backups before updates. |
 | `BACKUP_RETENTION_DAYS` | `7` | How many days to keep backups. |
@@ -368,15 +439,15 @@ cp ./db/ip2location.bin ./database/backups/manual_backup_$(date +%Y%m%d).bin
 
 ## Performance Metrics
 
-Optimized binary database performance:
+Optimized database performance:
 
-| Metric | Binary Database |
-|--------|-----------------|
-| Lookup Time | ~40 microseconds |
-| Memory Usage | ~10MB |
-| File Size | ~3MB (DB11-LITE) |
-| Concurrent Requests | 1000+ RPS |
-| CPU Usage | Minimal |
+| Metric | Geolocation (Binary) | Proxy Detection (CSV) |
+|--------|---------------------|----------------------|
+| Lookup Time | ~40 microseconds | ~100 microseconds |
+| Memory Usage | ~10MB | ~50-100MB |
+| File Size | ~3MB (DB11-LITE) | ~50MB (PX1-LITE) |
+| Concurrent Requests | 1000+ RPS | 1000+ RPS |
+| CPU Usage | Minimal | Low |
 
 ## Deployment Behind Cloudflare
 

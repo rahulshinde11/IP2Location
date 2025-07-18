@@ -40,6 +40,8 @@ logger = logging.getLogger(__name__)
 IP2LOCATION_DATABASE_PATH = os.getenv('IP2LOCATION_DATABASE_PATH', '/app/db/IP2LOCATION-LITE-DB1.BIN')
 IP2LOCATION_DOWNLOAD_TOKEN = os.getenv('IP2LOCATION_DOWNLOAD_TOKEN')
 IP2LOCATION_DATABASE_CODE = os.getenv('IP2LOCATION_DATABASE_CODE', 'DB1LITE')
+PROXY_DATABASE_CODE = os.getenv('PROXY_DATABASE_CODE', 'PX1LITE')
+ENABLE_PROXY_DETECTION = os.getenv('ENABLE_PROXY_DETECTION', 'false').lower() == 'true'
 BACKUP_ENABLED = os.getenv('BACKUP_ENABLED', 'true').lower() == 'true'
 BACKUP_RETENTION_DAYS = int(os.getenv('BACKUP_RETENTION_DAYS', '7'))
 
@@ -257,48 +259,302 @@ class IP2LocationUpdater:
         except Exception as e:
             logger.warning(f"Failed to log update information: {e}")
     
-    def perform_update(self):
-        """Perform complete database update"""
-        logger.info("Starting IP2Location binary database update")
+    def get_proxy_download_url(self) -> str:
+        """Construct the proxy database download URL"""
+        if IP2LOCATION_DOWNLOAD_TOKEN:
+            # Commercial proxy database URL
+            return f"https://www.ip2location.com/download?token={IP2LOCATION_DOWNLOAD_TOKEN}&file={PROXY_DATABASE_CODE}"
+        else:
+            # LITE proxy database URL - handle various formats like PX1LITE, PX12LITECSVIPV6
+            if 'LITE' in PROXY_DATABASE_CODE:
+                # Extract the PX number from codes like PX1LITE, PX2LITE, PX12LITECSVIPV6
+                code = PROXY_DATABASE_CODE
+                
+                # Remove known suffixes to get the base PX number
+                code = code.replace('LITE', '').replace('CSV', '').replace('IPV6', '').replace('IPV4', '')
+                px_number = code.replace('PX', '')
+                
+                # Determine if this is IPv6 database
+                is_ipv6 = 'IPV6' in PROXY_DATABASE_CODE
+                
+                if is_ipv6:
+                    lite_filename = f"IP2PROXY-LITE-PX{px_number}.IPV6"
+                else:
+                    lite_filename = f"IP2PROXY-LITE-PX{px_number}"
+                
+                return f"https://download.ip2location.com/lite/{lite_filename}.CSV.ZIP"
+            else:
+                # Fallback for non-LITE proxy databases
+                return f"https://www.ip2location.com/download?token={IP2LOCATION_DOWNLOAD_TOKEN}&file={PROXY_DATABASE_CODE}"
+    
+    def download_proxy_database(self) -> Optional[Path]:
+        """Download IP2Proxy LITE or commercial CSV database."""
+        if not ENABLE_PROXY_DETECTION:
+            logger.info("Proxy detection disabled, skipping proxy database download")
+            return None
+            
+        url = self.get_proxy_download_url()
+        
+        # Create a proper filename for the download
+        if IP2LOCATION_DOWNLOAD_TOKEN:
+            filename = f"{PROXY_DATABASE_CODE}.ZIP"
+        else:
+            # For LITE proxy databases, use the proper filename format
+            if 'LITE' in PROXY_DATABASE_CODE:
+                code = PROXY_DATABASE_CODE
+                code = code.replace('LITE', '').replace('CSV', '').replace('IPV6', '').replace('IPV4', '')
+                px_number = code.replace('PX', '')
+                
+                is_ipv6 = 'IPV6' in PROXY_DATABASE_CODE
+                
+                if is_ipv6:
+                    filename = f"IP2PROXY-LITE-PX{px_number}.IPV6.CSV.ZIP"
+                else:
+                    filename = f"IP2PROXY-LITE-PX{px_number}.CSV.ZIP"
+            else:
+                filename = f"{PROXY_DATABASE_CODE}.ZIP"
+        
+        download_path = self.download_dir / filename
+        
+        logger.info(f"Downloading {PROXY_DATABASE_CODE} from {url.split('?')[0]}")
         
         try:
-            # Download database
-            zip_path = self.download_database()
-            if not zip_path:
-                logger.error("Failed to download database")
-                return False
+            response = requests.get(url, stream=True, timeout=300)
+            response.raise_for_status()
             
-            # Create backup of current database
-            if not self.backup_current_database():
-                logger.warning("Backup failed, continuing with update...")
+            with open(download_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
             
-            # Extract binary database
-            bin_path = self.extract_binary_from_zip(zip_path)
-            if not bin_path:
-                logger.error("Failed to extract binary file")
-                return False
+            file_size = download_path.stat().st_size
+            logger.info(f"Downloaded proxy database {filename} ({file_size:,} bytes)")
             
-            # Update the database
-            if self.update_binary_database(bin_path):
-                logger.info("Binary database update completed successfully")
+            return download_path
+            
+        except requests.RequestException as e:
+            logger.error(f"Failed to download proxy database: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error during proxy database download: {e}")
+            return None
+    
+    def extract_csv_from_zip(self, zip_path: Path) -> Optional[Path]:
+        """Extract CSV file from ZIP archive"""
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                # Find the .CSV file
+                csv_files = [f for f in zip_ref.namelist() if f.upper().endswith('.CSV')]
+                if not csv_files:
+                    logger.error("No .CSV file found in the ZIP archive")
+                    return None
                 
-                # Log update information
-                self.log_update_info()
+                csv_filename = csv_files[0]
+                extracted_path = self.download_dir / csv_filename
+                
+                # Extract the CSV file
+                with zip_ref.open(csv_filename) as source, open(extracted_path, 'wb') as target:
+                    target.write(source.read())
+                
+                logger.info(f"Extracted {csv_filename}")
+                return extracted_path
+                
+        except zipfile.BadZipFile as e:
+            logger.error(f"Invalid ZIP file: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to extract CSV from ZIP: {e}")
+            return None
+    
+    def get_proxy_database_path(self) -> Path:
+        """Get the target path for the proxy CSV database"""
+        if 'LITE' in PROXY_DATABASE_CODE:
+            code = PROXY_DATABASE_CODE
+            code = code.replace('LITE', '').replace('CSV', '').replace('IPV6', '').replace('IPV4', '')
+            px_number = code.replace('PX', '')
+            
+            is_ipv6 = 'IPV6' in PROXY_DATABASE_CODE
+            
+            if is_ipv6:
+                return self.db_dir / f"IP2PROXY-LITE-PX{px_number}.IPV6.CSV"
+            else:
+                return self.db_dir / f"IP2PROXY-LITE-PX{px_number}.CSV"
+        else:
+            return self.db_dir / f"{PROXY_DATABASE_CODE}.CSV"
+    
+    def backup_current_proxy_database(self) -> bool:
+        """Create backup of current proxy CSV database."""
+        if not BACKUP_ENABLED:
+            return True
+            
+        proxy_db_path = self.get_proxy_database_path()
+        if not proxy_db_path.exists():
+            logger.info("No existing proxy database to backup")
+            return True
+        
+        try:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_filename = f"{proxy_db_path.stem}_backup_{timestamp}.csv"
+            backup_path = self.backup_dir / backup_filename
+            
+            shutil.copy2(proxy_db_path, backup_path)
+            logger.info(f"Proxy database backed up to: {backup_path}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to backup proxy database: {e}")
+            return False
+    
+    def update_proxy_database(self, csv_path: Path) -> bool:
+        """Update the proxy CSV database file."""
+        try:
+            target_path = self.get_proxy_database_path()
+            
+            # Validate CSV file
+            try:
+                with open(csv_path, 'r', encoding='utf-8') as f:
+                    import csv as csv_module
+                    reader = csv_module.reader(f)
+                    headers = next(reader, [])
+                    first_row = next(reader, [])
+                    
+                    if len(headers) < 4 or len(first_row) < 4:
+                        logger.error("Invalid proxy CSV format - insufficient columns")
+                        return False
+                    
+                    logger.info(f"Proxy CSV validation passed: {len(headers)} columns detected")
+                    
+            except Exception as e:
+                logger.error(f"Proxy CSV validation failed: {e}")
+                return False
+            
+            # Move the file to the target location
+            shutil.move(str(csv_path), str(target_path))
+            
+            # Set proper permissions
+            target_path.chmod(0o644)
+            
+            file_size = target_path.stat().st_size
+            logger.info(f"Proxy database updated: {target_path} ({file_size:,} bytes)")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to update proxy database: {e}")
+            return False
+    
+    def perform_proxy_update(self) -> bool:
+        """Perform complete proxy database update"""
+        if not ENABLE_PROXY_DETECTION:
+            logger.info("Proxy detection disabled, skipping proxy database update")
+            return True
+            
+        logger.info("Starting proxy database update")
+        
+        try:
+            # Download proxy database
+            zip_path = self.download_proxy_database()
+            if not zip_path:
+                logger.error("Failed to download proxy database")
+                return False
+            
+            # Create backup of current proxy database
+            if not self.backup_current_proxy_database():
+                logger.warning("Proxy backup failed, continuing with update...")
+            
+            # Extract CSV database
+            csv_path = self.extract_csv_from_zip(zip_path)
+            if not csv_path:
+                logger.error("Failed to extract CSV file")
+                return False
+            
+            # Update the proxy database
+            if self.update_proxy_database(csv_path):
+                logger.info("Proxy database update completed successfully")
                 
                 # Cleanup downloaded files
                 try:
                     zip_path.unlink()
-                    logger.info("Cleaned up temporary files")
+                    logger.info("Cleaned up proxy temporary files")
                 except Exception as e:
-                    logger.warning(f"Failed to cleanup files: {e}")
+                    logger.warning(f"Failed to cleanup proxy files: {e}")
                 
                 return True
             else:
-                logger.error("Binary database update failed")
+                logger.error("Proxy database update failed")
                 return False
                 
         except Exception as e:
-            logger.error(f"Database update failed: {e}")
+            logger.error(f"Proxy database update failed: {e}")
+            return False
+    
+    def perform_update(self):
+        """Perform complete database update (geolocation + proxy)"""
+        logger.info("Starting database update process")
+        
+        geo_success = True
+        proxy_success = True
+        
+        # Update geolocation database
+        try:
+            logger.info("Starting IP2Location binary database update")
+            
+            # Download database
+            zip_path = self.download_database()
+            if not zip_path:
+                logger.error("Failed to download geolocation database")
+                geo_success = False
+            else:
+                # Create backup of current database
+                if not self.backup_current_database():
+                    logger.warning("Geolocation backup failed, continuing with update...")
+                
+                # Extract binary database
+                bin_path = self.extract_binary_from_zip(zip_path)
+                if not bin_path:
+                    logger.error("Failed to extract binary file")
+                    geo_success = False
+                else:
+                    # Update the database
+                    if self.update_binary_database(bin_path):
+                        logger.info("Geolocation database update completed successfully")
+                        
+                        # Log update information
+                        self.log_update_info()
+                        
+                        # Cleanup downloaded files
+                        try:
+                            zip_path.unlink()
+                            logger.info("Cleaned up geolocation temporary files")
+                        except Exception as e:
+                            logger.warning(f"Failed to cleanup geolocation files: {e}")
+                    else:
+                        logger.error("Geolocation database update failed")
+                        geo_success = False
+                        
+        except Exception as e:
+            logger.error(f"Geolocation database update failed: {e}")
+            geo_success = False
+        
+        # Update proxy database (if enabled)
+        if ENABLE_PROXY_DETECTION:
+            try:
+                proxy_success = self.perform_proxy_update()
+            except Exception as e:
+                logger.error(f"Proxy database update failed: {e}")
+                proxy_success = False
+        else:
+            logger.info("Proxy detection disabled, skipping proxy database update")
+        
+        # Determine overall success
+        if geo_success and proxy_success:
+            logger.info("All database updates completed successfully")
+            return True
+        elif geo_success:
+            logger.warning("Geolocation database updated, but proxy database update failed")
+            return True  # Still consider success if main database updated
+        else:
+            logger.error("Database update process failed")
             return False
 
 def main():

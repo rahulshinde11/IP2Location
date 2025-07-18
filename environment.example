@@ -15,6 +15,14 @@ IP2LOCATION_DATABASE_CODE=DB11LITEBINIPV6
 # Specify the ASN database code for autonomous system number lookups
 IP2LOCATION_ASN_DATABASE_CODE=DBASNLITEBINIPV6
 
+# Proxy Detection Configuration
+# Enable proxy detection using CSV database (true/false)
+ENABLE_PROXY_DETECTION=true
+# Specify the proxy database code (e.g., PX1LITE for basic, PX12LITECSVIPV6 for full features)
+PROXY_DATABASE_CODE=PX12LITECSVIPV6
+# Proxy database file path (will be set automatically based on code)
+PROXY_DATABASE_PATH=/app/db/IP2PROXY-LITE-PX12.IPV6.CSV
+
 # Service Configuration
 LOG_LEVEL=INFO
 ENABLE_CLOUDFLARE_HEADERS=true
