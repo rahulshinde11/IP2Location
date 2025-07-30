@@ -6,12 +6,12 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
-    cron \
     wget \
     unzip \
     curl \
     sqlite3 \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3 /usr/bin/python
 
 # Copy requirements first for better caching
 COPY requirements.txt .
@@ -31,17 +31,15 @@ ENV PYTHONUNBUFFERED=1
 
 # Create non-root user and give permissions
 RUN useradd -m -u 1000 appuser && \
-    mkdir -p /var/run && \
-    touch /var/run/crond.pid && \
-    chown -R appuser:appuser /app /downloads /backups
+    chown -R appuser:appuser /app /downloads /backups && \
+    chmod +x /app/updater.py
 
-# Copy cron configuration as root
-COPY crontab /tmp/crontab
-RUN crontab -u appuser /tmp/crontab
-
-# Copy startup script and make it executable
+# Copy startup script and make it executable (as root)
 COPY startup.sh /app/startup.sh
 RUN chmod +x /app/startup.sh
+
+# Switch to non-root user
+USER appuser
 
 # Start with our custom startup script
 CMD ["/app/startup.sh"] 

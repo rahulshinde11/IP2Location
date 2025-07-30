@@ -731,6 +731,10 @@ def before_request():
     g.real_ip = real_ip
     g.start_time = datetime.utcnow()
     
+    # Skip logging for health endpoint
+    if request.path == '/health':
+        return
+    
     # Log request details
     logger.info(f"Request from {real_ip}: {request.method} {request.path}")
     
@@ -750,6 +754,10 @@ def before_request():
 @app.after_request
 def after_request(response):
     """Log response information"""
+    # Skip logging for health endpoint
+    if request.path == '/health':
+        return response
+    
     duration = (datetime.utcnow() - g.start_time).total_seconds()
     logger.info(f"Response to {g.real_ip}: {response.status_code} in {duration:.3f}s")
     return response

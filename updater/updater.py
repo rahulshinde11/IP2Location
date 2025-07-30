@@ -218,9 +218,16 @@ class IP2LocationUpdater:
             
             target_path = Path(IP2LOCATION_DATABASE_PATH)
             
-            # Move the new binary file to the target location
-            shutil.move(str(bin_path), str(target_path))
+            # Copy the new binary file to the target location (instead of move to avoid cross-device issues)
+            shutil.copy2(str(bin_path), str(target_path))
             logger.info(f"Binary database updated: {target_path}")
+            
+            # Clean up the source file after successful copy
+            try:
+                bin_path.unlink()
+                logger.info("Cleaned up temporary binary file")
+            except Exception as e:
+                logger.warning(f"Failed to cleanup temporary file: {e}")
             
             # Log database information
             try:
@@ -428,11 +435,18 @@ class IP2LocationUpdater:
                 logger.error(f"Proxy CSV validation failed: {e}")
                 return False
             
-            # Move the file to the target location
-            shutil.move(str(csv_path), str(target_path))
+            # Copy the file to the target location (instead of move to avoid cross-device issues)
+            shutil.copy2(str(csv_path), str(target_path))
             
             # Set proper permissions
             target_path.chmod(0o644)
+            
+            # Clean up the source file after successful copy
+            try:
+                csv_path.unlink()
+                logger.info("Cleaned up temporary CSV file")
+            except Exception as e:
+                logger.warning(f"Failed to cleanup temporary CSV file: {e}")
             
             file_size = target_path.stat().st_size
             logger.info(f"Proxy database updated: {target_path} ({file_size:,} bytes)")

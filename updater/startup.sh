@@ -44,7 +44,7 @@ if [ "$NEEDS_DOWNLOAD" = true ]; then
     # Download main database
     if [ ! -f "$DB_PATH" ]; then
         echo "Downloading main geolocation database..."
-        python updater.py
+        python3 updater.py
         if [ $? -eq 0 ]; then
             echo "Main database download completed successfully"
         else
@@ -121,7 +121,7 @@ if [ "$NEEDS_DOWNLOAD" = true ]; then
         echo "Proxy database code: $PROXY_DATABASE_CODE"
         
         # Use the main updater.py which now handles proxy databases
-        python updater.py
+        python3 updater.py
         
         if [ $? -eq 0 ]; then
             echo "Proxy database download completed successfully"
@@ -139,6 +139,37 @@ else
     echo "All databases exist, skipping initial download"
 fi
 
-# Start cron for scheduled updates
-echo "Starting cron daemon..."
-exec cron -f 
+# Start scheduled updates without cron
+echo "Starting scheduled update service..."
+echo "Update schedule: ${UPDATE_SCHEDULE:-0 2 * * *} (Daily at 2 AM)"
+
+# Function to run the updater
+run_updater() {
+    echo "Running scheduled database update..."
+    cd /app
+    python3 updater.py
+    if [ $? -eq 0 ]; then
+        echo "Scheduled update completed successfully"
+    else
+        echo "Scheduled update failed"
+    fi
+}
+
+# Run initial update if needed
+if [ "$NEEDS_DOWNLOAD" = true ]; then
+    echo "Running initial update..."
+    run_updater
+fi
+
+# Start the scheduling loop
+while true; do
+    # Sleep until next 2 AM
+    now=$(date +%s)
+    next_run=$(date -d "tomorrow 02:00:00" +%s)
+    sleep_seconds=$((next_run - now))
+    
+    echo "Next update scheduled for $(date -d "tomorrow 02:00:00") (in ${sleep_seconds} seconds)"
+    sleep $sleep_seconds
+    
+    run_updater
+done 
