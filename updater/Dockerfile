@@ -32,7 +32,9 @@ ENV PYTHONUNBUFFERED=1
 # Create non-root user and give permissions
 RUN useradd -m -u 1000 appuser && \
     chown -R appuser:appuser /app /downloads /backups && \
-    chmod +x /app/updater.py
+    chmod +x /app/updater.py && \
+    mkdir -p /app/logs && \
+    chown appuser:appuser /app/logs
 
 # Copy startup script and make it executable (as root)
 COPY startup.sh /app/startup.sh
