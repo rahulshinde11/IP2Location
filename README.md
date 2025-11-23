@@ -92,7 +92,7 @@ The service includes comprehensive proxy detection capabilities using IP2Proxy L
 | `PX1LITE` | Country | Basic proxy detection |
 | `PX2LITE` | Country + Proxy Type | Identify proxy types (PUB, VPN) |
 | `PX3LITE` | + Region + City | Geographic proxy analysis |
-| `PX4LITE` | + ISP | ISP-based filtering |
+| `PX4LITE` | + ASN Name | ISP-based filtering |
 | `PX8LITE` | + Last Seen | Temporal analysis |
 | `PX12LITE` or `PX12LITECSVIPV6` | + Threat + Residential + Provider + Fraud Score | Complete proxy analysis with fraud detection |
 
@@ -126,7 +126,7 @@ The service includes comprehensive proxy detection capabilities using IP2Proxy L
     "proxy_country_name": "United States",
     "proxy_region": "California",
     "proxy_city": "Los Angeles",
-    "proxy_isp": "ProxyService Inc",
+    "proxy_asn_name": "ProxyService Inc",
     "proxy_domain": "example-proxy.com",
     "proxy_usage_type": "COM",
     "proxy_asn": "64512",
@@ -281,7 +281,7 @@ curl "http://localhost:8080/api/v1/lookup?api_key=YOUR_API_KEY&ip=8.8.8.8"
   "zip_code": "94035",
   "time_zone": "-08:00",
   "asn": 15169,
-  "isp": "Google LLC",
+  "asn_name": "Google LLC",
   "proxy": {
     "is_proxy": false,
     "proxy_type": null,

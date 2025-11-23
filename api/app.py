@@ -146,7 +146,7 @@ class ProxyLookupEngine:
                         if len(row) > 6:
                             proxy_data['city_name'] = row[6].strip('"') if len(row) > 6 else None
                         if len(row) > 7:
-                            proxy_data['isp'] = row[7].strip('"') if len(row) > 7 else None
+                            proxy_data['asn_name'] = row[7].strip('"') if len(row) > 7 else None
                         if len(row) > 8:
                             proxy_data['domain'] = row[8].strip('"') if len(row) > 8 else None
                         if len(row) > 9:
@@ -294,7 +294,7 @@ class ProxyLookupEngine:
             
             # Count occurrences
             proxy_type = proxy_data.get('proxy_type', 'Unknown')
-            provider = proxy_data.get('provider', proxy_data.get('isp', 'Unknown'))
+            provider = proxy_data.get('provider', proxy_data.get('asn_name', 'Unknown'))
             country = proxy_data.get('country_code', 'Unknown')
             
             proxy_types[proxy_type] = proxy_types.get(proxy_type, 0) + 1
@@ -341,7 +341,7 @@ class ProxyLookupEngine:
         # Add optional fields from closest range
         if closest_range and closest_range['data']:
             closest_data = closest_range['data']
-            for field in ['region_name', 'city_name', 'isp', 'domain', 'usage_type', 'asn', 'last_seen', 'threat', 'residential', 'fraud_score']:
+            for field in ['region_name', 'city_name', 'asn_name', 'domain', 'usage_type', 'asn', 'last_seen', 'threat', 'residential', 'fraud_score']:
                 if closest_data.get(field):
                     result[field] = closest_data[field]
         
@@ -363,7 +363,7 @@ class ProxyLookupEngine:
             4: 'PX1',   # country
             5: 'PX2',   # + proxy_type
             7: 'PX3',   # + region, city
-            8: 'PX4',   # + isp
+            8: 'PX4',   # + asn_name
             9: 'PX5',   # + domain
             10: 'PX6',  # + usage_type
             11: 'PX7',  # + asn
@@ -548,7 +548,7 @@ def lookup_asn_info(ip: str) -> Dict[str, Any]:
     if not asn_db:
         return {
             "asn": None,
-            "isp": None
+            "asn_name": None
         }
     
     try:
@@ -569,14 +569,14 @@ def lookup_asn_info(ip: str) -> Dict[str, Any]:
         
         return {
             "asn": safe_int(result.asn),
-            "isp": safe_string(result.as_name)
+            "asn_name": safe_string(result.as_name)
         }
         
     except Exception as e:
         logger.error(f"ASN database lookup error: {e}")
         return {
             "asn": None,
-            "isp": None
+            "asn_name": None
         }
 
 def lookup_proxy_info(ip: str) -> Dict[str, Any]:
@@ -610,8 +610,8 @@ def lookup_proxy_info(ip: str) -> Dict[str, Any]:
                 proxy_response["proxy_region"] = result.get('region_name')
             if result.get('city_name'):
                 proxy_response["proxy_city"] = result.get('city_name')
-            if result.get('isp'):
-                proxy_response["proxy_isp"] = result.get('isp')
+            if result.get('asn_name'):
+                proxy_response["proxy_asn_name"] = result.get('asn_name')
             if result.get('domain'):
                 proxy_response["proxy_domain"] = result.get('domain')
             if result.get('usage_type'):
@@ -681,7 +681,7 @@ def lookup_ip_location(ip: str) -> Dict[str, Any]:
                 "zip_code": None,
                 "time_zone": None,
                 "asn": asn_info["asn"],
-                "isp": asn_info["isp"],
+                "asn_name": asn_info["asn_name"],
                 "proxy": proxy_info
             }
         
@@ -716,7 +716,7 @@ def lookup_ip_location(ip: str) -> Dict[str, Any]:
             "zip_code": safe_string(result.zipcode),
             "time_zone": safe_string(result.timezone),
             "asn": asn_info["asn"],
-            "isp": asn_info["isp"],
+            "asn_name": asn_info["asn_name"],
             "proxy": proxy_info
         }
         
