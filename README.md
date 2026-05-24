@@ -198,9 +198,10 @@ NEARBY_IP_MIN_MATCHES=3               # Minimum nearby proxy ranges required
 - **Database**: High-performance binary format with microsecond lookup times
 
 ### 2. Database Updater (`ip2location-updater`)
-- **Schedule**: Daily at 2:00 AM (configurable)
-- **Features**: Automatic downloads, backups, validation
-- **Format**: Downloads and processes IP2Location binary (.BIN) files
+- **Schedule**: Runs on `UPDATE_SCHEDULE` (cron syntax, default `0 2 * * *` = daily 2 AM)
+- **Databases**: Refreshes geolocation (.BIN), ASN (.BIN), and proxy (.CSV) together on every run
+- **Features**: Atomic install (temp file + rename), pre-update backups, post-download validation
+- **Permissions**: Self-heals bind-mount ownership on container start — no manual `chown` needed
 
 ## Binary Database Performance
 
@@ -469,8 +470,10 @@ cat ./db/last_update.log
 # Check last update
 docker-compose logs ip2location-updater | tail -20
 
-# Manual update trigger
-docker-compose exec ip2location-updater python updater.py
+# Manual update trigger (rarely needed — the updater runs on UPDATE_SCHEDULE).
+# Routed through the entrypoint so it fixes volume ownership and runs as appuser
+# (NOT as root), updating geolocation + ASN + proxy in one pass.
+docker-compose exec ip2location-updater python3 /app/entrypoint.py python3 updater.py
 ```
 
 ## Backup and Recovery
@@ -525,8 +528,8 @@ ls -la ./db/
 # Check updater logs
 docker-compose logs ip2location-updater
 
-# Manual update
-docker-compose exec ip2location-updater python updater.py
+# Manual update (runs as appuser via the entrypoint; updates all three databases)
+docker-compose exec ip2location-updater python3 /app/entrypoint.py python3 updater.py
 ```
 
 #### API Returns 500 Error

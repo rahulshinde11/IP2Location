@@ -3,7 +3,14 @@ API_KEY=your_secure_api_key
 API_PORT=8080
 
 # Authentication Configuration
+# If you set DISABLE_API_KEY_AUTH=false, you MUST set a real API_KEY above.
+# Leaving API_KEY unset or as the placeholder while auth is enabled now denies
+# all requests (fail closed) instead of allowing everyone.
 DISABLE_API_KEY_AUTH=true
+
+# CORS: "*" allows any origin (default). Set a comma-separated allowlist to lock
+# down browser cross-origin access, e.g. CORS_ORIGINS=https://app.example.com
+CORS_ORIGINS=*
 
 # IP2Location Configuration
 # Required for downloading commercial databases. For LITE versions, leave empty.

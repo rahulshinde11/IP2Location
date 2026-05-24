@@ -1,9 +1,0 @@
-# IP2Location Database Updater Cron Schedule
-# This crontab is managed by the updater service itself
-# Manual entries should not be added here
-
-# Default: Daily at 2:00 AM
-0 2 * * * cd /app && python3 updater.py >> /tmp/cron/cron.log 2>&1
-
-# Log rotation (weekly)
-0 0 * * 0 find /app/logs -name "*.log" -size +100M -exec truncate -s 50M {} \; 

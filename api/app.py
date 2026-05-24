@@ -10,6 +10,7 @@ import logging
 import ipaddress
 import csv
 import bisect
+import hmac
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
@@ -47,7 +48,10 @@ logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app)
+# Configurable CORS. Defaults to "*" (open) to preserve existing behavior; set
+# CORS_ORIGINS to a comma-separated allowlist to lock it down.
+_cors_origins = os.getenv('CORS_ORIGINS', '*').strip() or '*'
+CORS(app, origins='*' if _cors_origins == '*' else [o.strip() for o in _cors_origins.split(',')])
 
 # Configure JSON pretty printing
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
@@ -532,13 +536,30 @@ def get_real_ip() -> str:
     return request.remote_addr or '127.0.0.1'
 
 def validate_api_key() -> bool:
-    """Validate API key from request headers or query parameters"""
+    """Validate the API key from request headers or query parameters.
+
+    Fails closed: if authentication is enabled but no real key is configured,
+    every request is denied. (Previously an unset API_KEY made the comparison
+    ``None == None`` succeed, authenticating everyone.)
+    """
     if app.config['DISABLE_API_KEY_AUTH']:
-        logger.debug("API key authentication is disabled")
         return True
 
-    api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
-    return api_key == app.config['API_KEY']
+    configured_key = app.config.get('API_KEY')
+    if not configured_key or configured_key == 'your_secure_api_key':
+        logger.error(
+            "API key authentication is enabled but API_KEY is unset or still the "
+            "default placeholder; denying request. Set a real API_KEY or "
+            "DISABLE_API_KEY_AUTH=true."
+        )
+        return False
+
+    provided_key = request.headers.get('X-API-Key') or request.args.get('api_key')
+    if not provided_key:
+        return False
+
+    # Constant-time comparison to avoid leaking the key via timing.
+    return hmac.compare_digest(provided_key, configured_key)
 
 def lookup_asn_info(ip: str) -> Dict[str, Any]:
     """Lookup ASN information using ASN database"""
@@ -766,8 +787,8 @@ def after_request(response):
 @limiter.limit("100 per minute")
 def root():
     """Simplified IP lookup endpoint"""
-    # Validate API key if authentication is enabled
-    if not app.config['DISABLE_API_KEY_AUTH'] and not validate_api_key():
+    # validate_api_key() already short-circuits when auth is disabled.
+    if not validate_api_key():
         return pretty_json_response({"error": "Invalid or missing API key"}, 401)
     
     # Get IP address from query parameter or use client IP

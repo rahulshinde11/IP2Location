@@ -18,6 +18,7 @@ services:
       - NEARBY_IP_MIN_MATCHES=${NEARBY_IP_MIN_MATCHES:-3}
       - ENABLE_CLOUDFLARE_HEADERS=${ENABLE_CLOUDFLARE_HEADERS:-true}
       - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-100}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - REDIS_URL=redis://redis:6379
     ports:
@@ -25,6 +26,9 @@ services:
     volumes:
       - ./db:/app/db
       - ./api/logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
     networks:
       - ip2location_network
       - nginx-proxy
@@ -39,12 +43,16 @@ services:
     environment:
       - IP2LOCATION_DOWNLOAD_TOKEN=${IP2LOCATION_DOWNLOAD_TOKEN}
       - IP2LOCATION_DATABASE_CODE=${IP2LOCATION_DATABASE_CODE:-DB1LITE}
+      - IP2LOCATION_DATABASE_PATH=${IP2LOCATION_DATABASE_PATH:-/app/db/IP2LOCATION-LITE-DB1.BIN}
       - IP2LOCATION_ASN_DATABASE_CODE=${IP2LOCATION_ASN_DATABASE_CODE}
+      - ASN_DATABASE_PATH=${ASN_DATABASE_PATH:-/app/db/IP2LOCATION-LITE-ASN.BIN}
       - PROXY_DATABASE_CODE=${PROXY_DATABASE_CODE:-PX12LITECSVIPV6}
+      - PROXY_DATABASE_PATH=${PROXY_DATABASE_PATH:-/app/db/IP2PROXY-LITE-PX12.IPV6.CSV}
       - ENABLE_PROXY_DETECTION=${ENABLE_PROXY_DETECTION:-false}
       - UPDATE_SCHEDULE=${UPDATE_SCHEDULE:-0 2 * * *}  # Daily at 2 AM
       - BACKUP_ENABLED=${BACKUP_ENABLED:-true}
       - BACKUP_RETENTION_DAYS=${BACKUP_RETENTION_DAYS:-7}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
       - ./db:/app/db
       - ./database/downloads:/downloads
@@ -58,6 +66,11 @@ services:
     image: redis:7-alpine
     container_name: ip2location-redis
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     networks:
       - ip2location_network
 
