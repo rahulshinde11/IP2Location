@@ -10,12 +10,12 @@ import time
 import logging
 import ipaddress
 import csv
-import bisect
 import hmac
 import threading
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List
 from pathlib import Path
+from array import array
 
 from flask import Flask, request, g, Response
 from flask_cors import CORS
@@ -123,46 +123,77 @@ PROXY_FIELDS = (
     'residential', 'provider', 'fraud_score',
 )
 
+_MASK64 = (1 << 64) - 1  # for splitting 128-bit IPs into uint64 hi/lo halves
+
 class ProxyLookupEngine:
     """High-performance CSV-based proxy lookup engine using in-memory IP ranges"""
     
     def __init__(self, csv_path: str):
         self.csv_path = csv_path
-        # Each row is a flat tuple: (ip_start, ip_end, <14 proxy fields>), sorted
-        # by ip_start. Storing tuples (not a dict per row) and interning the
-        # repeated string fields keeps the full IPv6 dataset to a fraction of the
-        # memory the old dict-per-row layout used — important when several API
-        # workers/instances each hold a copy.
-        self.rows = []
+        # Compact columnar storage instead of a Python object per row:
+        #   * IP bounds are 128-bit, split into uint64 hi/lo halves in `array`s
+        #     (no per-row int objects).
+        #   * Each of the 14 fields is dictionary-encoded — a small per-row index
+        #     into that column's list of distinct values (each value stored once).
+        # This holds the full PX12 IPv6 set in a fraction of the RAM the old
+        # tuple/dict-per-row layout used, with the same binary-search lookup.
+        self.s_hi = array('Q'); self.s_lo = array('Q')
+        self.e_hi = array('Q'); self.e_lo = array('Q')
+        self.col_idx = [array('I') for _ in PROXY_FIELDS]
+        self.col_vals = [[] for _ in PROXY_FIELDS]
         self.headers = []
+        self.n = 0
         self.total_ranges = 0
         self.load_csv()
-    
-    def ip_to_int(self, ip_str: str) -> int:
-        """Convert IP address string to integer for range comparison"""
-        try:
-            ip_obj = ipaddress.ip_address(ip_str)
-            if isinstance(ip_obj, ipaddress.IPv4Address):
-                return int(ip_obj)
-            elif isinstance(ip_obj, ipaddress.IPv6Address):
-                return int(ip_obj)
+
+    def _start(self, i: int) -> int:
+        return (self.s_hi[i] << 64) | self.s_lo[i]
+
+    def _end(self, i: int) -> int:
+        return (self.e_hi[i] << 64) | self.e_lo[i]
+
+    def _bisect_right(self, hi: int, lo: int) -> int:
+        """bisect_right over the sorted (hi, lo) start keys."""
+        s_hi, s_lo = self.s_hi, self.s_lo
+        a, b = 0, self.n
+        while a < b:
+            m = (a + b) >> 1
+            if s_hi[m] < hi or (s_hi[m] == hi and s_lo[m] <= lo):
+                a = m + 1
             else:
-                return 0
-        except ValueError:
-            return 0
-    
+                b = m
+        return a
+
+    def _bisect_left(self, hi: int, lo: int) -> int:
+        """bisect_left over the sorted (hi, lo) start keys."""
+        s_hi, s_lo = self.s_hi, self.s_lo
+        a, b = 0, self.n
+        while a < b:
+            m = (a + b) >> 1
+            if s_hi[m] < hi or (s_hi[m] == hi and s_lo[m] < lo):
+                a = m + 1
+            else:
+                b = m
+        return a
+
     def load_csv(self):
-        """Load the proxy CSV into memory as interned, flat row tuples."""
+        """Load the proxy CSV into compact columnar arrays."""
         logger.info(f"Loading proxy database from {self.csv_path}")
         start_time = datetime.now(timezone.utc)
 
-        rows = []
-        intern_tbl = {}  # dedupe repeated field strings to a single shared object
+        s_hi = array('Q'); s_lo = array('Q'); e_hi = array('Q'); e_lo = array('Q')
+        col_idx = [array('I') for _ in PROXY_FIELDS]   # uint32 during build
+        col_dicts = [dict() for _ in PROXY_FIELDS]     # value -> index (dropped after load)
+        col_vals = [[] for _ in PROXY_FIELDS]          # index -> distinct value
+        nfields = len(PROXY_FIELDS)
+        self.headers = []
+        is_sorted = True
+        prev = (-1, -1)
+
         try:
             with open(self.csv_path, 'r', encoding='utf-8') as f:
                 reader = csv.reader(f)
                 # IP2Proxy CSV files have no header row; detect width from data.
-                self.headers = []
                 for row in reader:
                     if len(row) < 4:  # need ip_from, ip_to, country_code, country_name
                         continue
@@ -174,38 +205,84 @@ class ProxyLookupEngine:
                     except ValueError:
                         continue
 
-                    # Columns 2.. map to PROXY_FIELDS in order; pad missing with None.
-                    record = [ip_from, ip_to]
-                    for i in range(len(PROXY_FIELDS)):
-                        col = i + 2
-                        if col < len(row):
-                            val = row[col].strip('"')
-                            val = intern_tbl.setdefault(val, val)  # share duplicate strings
-                        else:
-                            val = None
-                        record.append(val)
-                    rows.append(tuple(record))
+                    hi, lo = ip_from >> 64, ip_from & _MASK64
+                    if (hi, lo) < prev:
+                        is_sorted = False
+                    prev = (hi, lo)
+                    s_hi.append(hi); s_lo.append(lo)
+                    e_hi.append(ip_to >> 64); e_lo.append(ip_to & _MASK64)
 
-            rows.sort(key=lambda r: r[0])  # in-place sort by ip_start for binary search
-            self.rows = rows
-            self.total_ranges = len(rows)
+                    # Columns 2.. map to PROXY_FIELDS in order; missing -> None.
+                    for c in range(nfields):
+                        col = c + 2
+                        val = row[col].strip('"') if col < len(row) else None
+                        d = col_dicts[c]
+                        idx = d.get(val)
+                        if idx is None:
+                            idx = len(col_vals[c])
+                            d[val] = idx
+                            col_vals[c].append(val)
+                        col_idx[c].append(idx)
 
+            del col_dicts  # encoding done; free the value->index maps
+            n = len(s_hi)
+
+            # IP2Location CSVs ship sorted by ip_from; only reorder if that turns
+            # out not to hold (keeps the common path single-pass and low-memory).
+            if not is_sorted and n > 1:
+                # Rare: IP2Location CSVs ship sorted. `perm` materializes n Python
+                # ints (~28 B each, e.g. ~200 MB at 7M rows) for this one pass.
+                logger.warning("Proxy CSV not sorted by ip_from; sorting in memory")
+                perm = sorted(range(n), key=lambda i: (s_hi[i], s_lo[i]))
+                s_hi = array('Q', (s_hi[i] for i in perm))
+                s_lo = array('Q', (s_lo[i] for i in perm))
+                e_hi = array('Q', (e_hi[i] for i in perm))
+                e_lo = array('Q', (e_lo[i] for i in perm))
+                col_idx = [array(col.typecode, (col[i] for i in perm)) for col in col_idx]
+                del perm
+
+            # Down-size each index column to the smallest int type that fits,
+            # freeing the wide build array as we go to keep the peak down.
+            sized = [None] * nfields
+            for c in range(nfields):
+                m = len(col_vals[c])
+                typecode = 'B' if m <= 256 else ('H' if m <= 65536 else 'I')
+                sized[c] = col_idx[c] if typecode == 'I' else array(typecode, col_idx[c])
+                col_idx[c] = None
+
+            self.s_hi, self.s_lo, self.e_hi, self.e_lo = s_hi, s_lo, e_hi, e_lo
+            self.col_idx = sized
+            self.col_vals = col_vals
+            self.n = n
+            self.total_ranges = n
+
+            uniq = sum(len(v) for v in col_vals)
             load_time = (datetime.now(timezone.utc) - start_time).total_seconds()
-            logger.info(f"Proxy database loaded: {self.total_ranges:,} ranges, "
-                        f"{len(intern_tbl):,} unique field values in {load_time:.2f}s")
+            logger.info(f"Proxy database loaded: {n:,} ranges, "
+                        f"{uniq:,} unique field values in {load_time:.2f}s")
         except Exception as e:
             logger.error(f"Failed to load proxy database: {e}")
-            self.rows = []
+            self.s_hi = array('Q'); self.s_lo = array('Q')
+            self.e_hi = array('Q'); self.e_lo = array('Q')
+            self.col_idx = [array('I') for _ in PROXY_FIELDS]
+            self.col_vals = [[] for _ in PROXY_FIELDS]
+            self.n = 0
             self.total_ranges = 0
     
-    def _row_to_dict(self, row) -> Dict[str, Any]:
-        """Build a fresh proxy-data dict from a stored row tuple (non-None fields)."""
-        return {field: row[i + 2] for i, field in enumerate(PROXY_FIELDS)
-                if row[i + 2] is not None}
+    def _row_to_dict(self, i: int) -> Dict[str, Any]:
+        """Decode stored row `i` back into a proxy-data dict (skipping absent fields)."""
+        out = {}
+        col_idx = self.col_idx
+        col_vals = self.col_vals
+        for c, field in enumerate(PROXY_FIELDS):
+            val = col_vals[c][col_idx[c][i]]
+            if val is not None:
+                out[field] = val
+        return out
 
     def lookup(self, ip: str) -> Optional[Dict[str, Any]]:
         """Lookup proxy information for an IP using binary search with nearby IP detection"""
-        if not self.rows:
+        if not self.n:
             return None
 
         try:
@@ -219,15 +296,13 @@ class ProxyLookupEngine:
 
             # Try each IP representation for an exact match first.
             for ip_int in ip_ints_to_check:
-                idx = bisect.bisect_right(self.rows, ip_int, key=lambda r: r[0]) - 1
-                if 0 <= idx < len(self.rows):
-                    row = self.rows[idx]
-                    if row[0] <= ip_int <= row[1]:
-                        # Build a fresh dict so we never mutate the stored row.
-                        result = self._row_to_dict(row)
-                        result['detection_method'] = 'exact_match'
-                        result['confidence'] = 'high'
-                        return result
+                hi, lo = ip_int >> 64, ip_int & _MASK64
+                idx = self._bisect_right(hi, lo) - 1
+                if 0 <= idx < self.n and self._start(idx) <= ip_int <= self._end(idx):
+                    result = self._row_to_dict(idx)
+                    result['detection_method'] = 'exact_match'
+                    result['confidence'] = 'high'
+                    return result
 
             # If no exact match and nearby detection is enabled, check nearby IPs.
             if app.config.get('ENABLE_NEARBY_PROXY_DETECTION', True):
@@ -249,17 +324,18 @@ class ProxyLookupEngine:
             nearby_ranges = []
 
             # Find the insertion point for binary search
-            idx = bisect.bisect_left(self.rows, ip_int, key=lambda r: r[0])
+            hi, lo = ip_int >> 64, ip_int & _MASK64
+            idx = self._bisect_left(hi, lo)
 
             # Check ranges before the target IP
             for i in range(max(0, idx - 50), idx):
-                row = self.rows[i]
-                ip_start, ip_end = row[0], row[1]
+                ip_start = self._start(i)
+                ip_end = self._end(i)
 
                 # Calculate distance from our target IP
                 distance = abs(ip_int - ip_end)
                 if distance <= search_distance:
-                    proxy_data = self._row_to_dict(row)
+                    proxy_data = self._row_to_dict(i)
                     nearby_ranges.append({
                         'distance': distance,
                         'data': proxy_data,
@@ -269,14 +345,14 @@ class ProxyLookupEngine:
                     nearby_proxies.append(proxy_data)
 
             # Check ranges after the target IP
-            for i in range(idx, min(len(self.rows), idx + 50)):
-                row = self.rows[i]
-                ip_start, ip_end = row[0], row[1]
+            for i in range(idx, min(self.n, idx + 50)):
+                ip_start = self._start(i)
+                ip_end = self._end(i)
 
                 # Calculate distance from our target IP
                 distance = abs(ip_start - ip_int)
                 if distance <= search_distance:
-                    proxy_data = self._row_to_dict(row)
+                    proxy_data = self._row_to_dict(i)
                     nearby_ranges.append({
                         'distance': distance,
                         'data': proxy_data,
