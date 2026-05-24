@@ -6,12 +6,14 @@ Binary database format only for optimal performance
 
 import os
 import json
+import time
 import logging
 import ipaddress
 import csv
 import bisect
 import hmac
-from datetime import datetime
+import threading
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
 
@@ -72,6 +74,9 @@ app.config['DISABLE_API_KEY_AUTH'] = os.getenv('DISABLE_API_KEY_AUTH', 'false').
 app.config['ENABLE_CLOUDFLARE_HEADERS'] = os.getenv('ENABLE_CLOUDFLARE_HEADERS', 'true').lower() == 'true'
 app.config['RATE_LIMIT_PER_MINUTE'] = int(os.getenv('RATE_LIMIT_PER_MINUTE', '100'))
 app.config['REDIS_URL'] = os.getenv('REDIS_URL')
+# How often (seconds) a request is allowed to stat the DB files for hot-reload.
+# The databases change at most daily, so checking on every request wastes syscalls.
+app.config['RELOAD_CHECK_INTERVAL'] = float(os.getenv('RELOAD_CHECK_INTERVAL_SECONDS', '5'))
 
 # Initialize rate limiter
 limiter = Limiter(
@@ -80,6 +85,12 @@ limiter = Limiter(
     default_limits=[f"{app.config['RATE_LIMIT_PER_MINUTE']} per minute"],
     storage_uri=app.config['REDIS_URL']
 )
+
+
+def per_minute_limit() -> str:
+    """Dynamic rate limit so RATE_LIMIT_PER_MINUTE is actually honored on routes
+    that previously hardcoded their own value."""
+    return f"{app.config['RATE_LIMIT_PER_MINUTE']} per minute"
 
 # Global variables for database connections
 binary_db = None
@@ -90,6 +101,19 @@ asn_db_mtime = None
 # Global variables for proxy database
 proxy_lookup_engine = None
 proxy_db_mtime = None
+
+# Hot-reload throttle + serialization. The lock prevents concurrent worker
+# threads from rebuilding the same database at once (a stampede that would
+# briefly hold two copies of the multi-GB proxy CSV in memory).
+_reload_lock = threading.Lock()
+_last_reload_check = 0.0
+
+# Background hot-reload watcher. Reloading is done off the request path so the
+# first query after a daily database update no longer blocks while the (large)
+# proxy CSV is parsed — requests keep serving the old data until the swap is
+# ready.
+_watcher_started = False
+_watcher_lock = threading.Lock()
 
 # IP2Proxy CSV columns after (ip_from, ip_to), in file order. Used to map the
 # stored row tuples back to named fields.
@@ -130,7 +154,7 @@ class ProxyLookupEngine:
     def load_csv(self):
         """Load the proxy CSV into memory as interned, flat row tuples."""
         logger.info(f"Loading proxy database from {self.csv_path}")
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
 
         rows = []
         intern_tbl = {}  # dedupe repeated field strings to a single shared object
@@ -166,7 +190,7 @@ class ProxyLookupEngine:
             self.rows = rows
             self.total_ranges = len(rows)
 
-            load_time = (datetime.utcnow() - start_time).total_seconds()
+            load_time = (datetime.now(timezone.utc) - start_time).total_seconds()
             logger.info(f"Proxy database loaded: {self.total_ranges:,} ranges, "
                         f"{len(intern_tbl):,} unique field values in {load_time:.2f}s")
         except Exception as e:
@@ -369,15 +393,43 @@ class ProxyLookupEngine:
         }
         return level_map.get(field_count, f'Unknown({field_count} fields)')
 
-def check_and_reload_database():
-    """Check if database files have been updated and reload if necessary"""
+def check_and_reload_database(force: bool = False):
+    """Check if database files have been updated and reload if necessary.
+
+    Throttled to at most one filesystem check per RELOAD_CHECK_INTERVAL seconds
+    and serialized by a lock, so a single request no longer triggers it three
+    times and concurrent requests can't rebuild the same DB simultaneously.
+    Pass force=True (e.g. the manual /reload endpoint) to bypass the throttle.
+    """
     global binary_db, asn_db, binary_db_mtime, asn_db_mtime, proxy_lookup_engine, proxy_db_mtime
-    
+    global _last_reload_check
+
     if not BINARY_SUPPORT:
         return False
-    
+
+    interval = app.config['RELOAD_CHECK_INTERVAL']
+    now = time.monotonic()
+    # Fast path: skip without taking the lock or hitting the filesystem.
+    if not force and (now - _last_reload_check) < interval:
+        return False
+
+    with _reload_lock:
+        # Re-check inside the lock: another thread may have just refreshed.
+        now = time.monotonic()
+        if not force and (now - _last_reload_check) < interval:
+            return False
+        _last_reload_check = now
+
+        return _reload_databases()
+
+
+def _reload_databases():
+    """Stat each configured database file and reload any that changed on disk.
+    Caller must hold _reload_lock."""
+    global binary_db, asn_db, binary_db_mtime, asn_db_mtime, proxy_lookup_engine, proxy_db_mtime
+
     reloaded = False
-    
+
     # Check main geolocation database
     binary_path = Path(app.config['IP2LOCATION_DATABASE_PATH'])
     if binary_path.exists():
@@ -418,8 +470,45 @@ def check_and_reload_database():
                     reloaded = True
                 except Exception as e:
                     logger.error(f"Failed to reload proxy database: {e}")
-    
+
     return reloaded
+
+
+def _db_watcher_loop():
+    """Periodically reload changed databases in the background.
+
+    The actual parse/build (e.g. the large proxy CSV) happens on this thread, so
+    request threads never block on it. The global engine/db references are only
+    swapped once the new object is fully built, so in-flight lookups keep using
+    the old data until then.
+    """
+    interval = max(1.0, app.config['RELOAD_CHECK_INTERVAL'])
+    while True:
+        time.sleep(interval)
+        try:
+            with _reload_lock:
+                _reload_databases()
+        except Exception as e:
+            logger.error(f"Background database reload check failed: {e}")
+
+
+def start_db_watcher():
+    """Start the background reload watcher once per process (idempotent).
+
+    Must be called *after* fork under gunicorn (threads don't survive the fork
+    from a preloaded master), so it's invoked from the gunicorn post_fork hook,
+    the dev-server __main__ block, and lazily on the first request.
+    """
+    global _watcher_started
+    if _watcher_started:
+        return
+    with _watcher_lock:
+        if _watcher_started:
+            return
+        _watcher_started = True
+        threading.Thread(target=_db_watcher_loop, name="db-watcher", daemon=True).start()
+        logger.info(f"Database hot-reload watcher started (interval={app.config['RELOAD_CHECK_INTERVAL']}s)")
+
 
 def init_database():
     """Initialize binary database connections"""
@@ -553,9 +642,7 @@ def validate_api_key() -> bool:
 
 def lookup_asn_info(ip: str) -> Dict[str, Any]:
     """Lookup ASN information using ASN database"""
-    # Check for database updates
-    check_and_reload_database()
-    
+    # Reload is handled once per request by the caller (lookup_ip_location).
     if not asn_db:
         return {
             "asn": None,
@@ -592,9 +679,7 @@ def lookup_asn_info(ip: str) -> Dict[str, Any]:
 
 def lookup_proxy_info(ip: str) -> Dict[str, Any]:
     """Lookup proxy information using CSV database with nearby IP detection"""
-    # Check for database updates
-    check_and_reload_database()
-    
+    # Reload is handled once per request by the caller (lookup_ip_location).
     if not app.config['ENABLE_PROXY_DETECTION'] or not proxy_lookup_engine:
         return {
             "is_proxy": False,
@@ -666,9 +751,8 @@ def lookup_proxy_info(ip: str) -> Dict[str, Any]:
 
 def lookup_ip_location(ip: str) -> Dict[str, Any]:
     """Lookup IP location using binary database"""
-    # Check for database updates
-    check_and_reload_database()
-    
+    # Database reloads are handled by the background watcher thread, so this
+    # request path never blocks on parsing an updated database.
     if not binary_db:
         raise Exception("Binary database not initialized")
     
@@ -700,8 +784,10 @@ def lookup_ip_location(ip: str) -> Dict[str, Any]:
         def safe_float(value):
             if isinstance(value, str) and ("unavailable" in value.lower() or "upgrade" in value.lower()):
                 return None
+            # Note: do NOT treat 0 as "missing" — 0.0 is a valid coordinate
+            # (equator / prime meridian) and was previously dropped to null.
             try:
-                return float(value) if value != 0 and value != '-' else None
+                return float(value) if value != '-' else None
             except (ValueError, TypeError):
                 return None
         
@@ -738,9 +824,14 @@ def lookup_ip_location(ip: str) -> Dict[str, Any]:
 @app.before_request
 def before_request():
     """Log incoming requests with real IP information"""
+    # Ensure the background reload watcher is running in this worker process
+    # (cheap no-op after the first request; covers servers that don't call the
+    # gunicorn post_fork hook).
+    start_db_watcher()
+
     real_ip = get_real_ip()
     g.real_ip = real_ip
-    g.start_time = datetime.utcnow()
+    g.start_time = datetime.now(timezone.utc)
     
     # Skip logging for health endpoint
     if request.path == '/health':
@@ -769,12 +860,12 @@ def after_request(response):
     if request.path == '/health':
         return response
     
-    duration = (datetime.utcnow() - g.start_time).total_seconds()
+    duration = (datetime.now(timezone.utc) - g.start_time).total_seconds()
     logger.info(f"Response to {g.real_ip}: {response.status_code} in {duration:.3f}s")
     return response
 
 @app.route('/')
-@limiter.limit("100 per minute")
+@limiter.limit(per_minute_limit)
 def root():
     """Simplified IP lookup endpoint"""
     # validate_api_key() already short-circuits when auth is disabled.
@@ -795,7 +886,7 @@ def root():
         
         # Add metadata
         result.update({
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "client_ip": get_real_ip(),
             "queried_ip": ip
         })
@@ -856,7 +947,7 @@ def health():
     
     health_response = {
         "status": overall_status,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "databases": {
             "geolocation": {
                 "status": geo_db_status,
@@ -886,7 +977,7 @@ def health():
     return pretty_json_response(health_response)
 
 @app.route('/api/v1/lookup')
-@limiter.limit("50 per minute")
+@limiter.limit(per_minute_limit)
 def lookup_ip():
     """
     Lookup IP geolocation
@@ -912,7 +1003,7 @@ def lookup_ip():
         
         # Add metadata
         result.update({
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "client_ip": get_real_ip(),
             "queried_ip": ip
         })
@@ -964,7 +1055,7 @@ def lookup_batch():
         
         return pretty_json_response({
             "results": results,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "client_ip": get_real_ip(),
             "total_queries": len(ips)
         })
@@ -982,13 +1073,14 @@ def reload_database():
         return pretty_json_response({"error": "Invalid or missing API key"}, 401)
     
     try:
-        reloaded = check_and_reload_database()
-        
+        # Manual trigger: bypass the per-request throttle.
+        reloaded = check_and_reload_database(force=True)
+
         return pretty_json_response({
             "status": "success",
             "reloaded": reloaded,
             "message": "Database reload check completed" if reloaded else "No database changes detected",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "databases": {
                 "geolocation": {
                     "loaded": binary_db is not None,
@@ -1041,7 +1133,7 @@ def api_info():
         },
         "attribution": "This service uses IP2Location LITE data available from https://www.ip2location.com",
         "client_ip": get_real_ip(),
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     })
 
 @app.errorhandler(429)
@@ -1067,10 +1159,13 @@ if __name__ == '__main__':
     logger.info(f"Cloudflare headers enabled: {app.config['ENABLE_CLOUDFLARE_HEADERS']}")
     logger.info(f"Rate limit: {app.config['RATE_LIMIT_PER_MINUTE']} requests per minute")
     logger.info(f"API key authentication enabled: {not app.config['DISABLE_API_KEY_AUTH']}")
-    
+
+    # Background DB hot-reload watcher (gunicorn starts it via post_fork instead).
+    start_db_watcher()
+
     app.run(
         host='0.0.0.0',
         port=5000,
         debug=False,
         threaded=True
-    ) 
+    )

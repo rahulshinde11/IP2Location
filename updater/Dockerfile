@@ -2,10 +2,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Build deps only; extraction and scheduling are handled in Python now.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
+# No system build deps needed: requirements (requests, croniter, IP2Location,
+# python-dotenv) are pure-Python wheels. Extraction/scheduling are done in Python.
 
 # Install Python dependencies (cached unless requirements change)
 COPY requirements.txt .

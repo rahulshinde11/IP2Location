@@ -21,6 +21,10 @@ services:
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - REDIS_URL=redis://redis:6379
+      # Gunicorn concurrency (see api/gunicorn.conf.py). With a large proxy CSV
+      # and tight memory, set WEB_CONCURRENCY=1 and raise GUNICORN_THREADS.
+      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-2}
+      - GUNICORN_THREADS=${GUNICORN_THREADS:-4}
     ports:
       - "${API_PORT:-8080}:8080"
     volumes:
@@ -63,7 +67,7 @@ services:
 
   # Redis for rate limiting
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     container_name: ip2location-redis
     restart: unless-stopped
     healthcheck:

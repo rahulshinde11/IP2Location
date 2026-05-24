@@ -43,6 +43,15 @@ LOG_LEVEL=INFO
 ENABLE_CLOUDFLARE_HEADERS=true
 RATE_LIMIT_PER_MINUTE=100
 
+# Gunicorn concurrency. WEB_CONCURRENCY = worker processes, GUNICORN_THREADS =
+# threads per worker. With a large proxy CSV and limited memory, prefer
+# WEB_CONCURRENCY=1 with more threads (one shared in-memory copy).
+WEB_CONCURRENCY=2
+GUNICORN_THREADS=4
+
+# How often (seconds) the API re-checks DB files on disk for hot-reload.
+RELOAD_CHECK_INTERVAL_SECONDS=5
+
 # Updater Configuration
 UPDATE_SCHEDULE=0 2 * * *
 BACKUP_ENABLED=true
