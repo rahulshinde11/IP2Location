@@ -203,18 +203,16 @@ NEARBY_IP_MIN_MATCHES=3               # Minimum nearby proxy ranges required
 - **Features**: Atomic install (temp file + rename), pre-update backups, post-download validation
 - **Permissions**: Self-heals bind-mount ownership on container start — no manual `chown` needed
 
-## Binary Database Performance
+## Performance & Memory
 
-The binary database format provides exceptional performance:
-- **Lookup Time**: ~40 microseconds per query
-- **Memory Usage**: ~10MB RAM
-- **File Size**: ~3MB for DB11-LITE
-- **Efficiency**: Direct binary access without SQL overhead
+- **Geolocation / ASN (binary)**: microsecond-range lookups via the IP2Location library; small RAM footprint.
+- **Proxy (CSV)**: loaded into memory as interned, columnar row tuples and binary-searched. Footprint scales with the dataset — roughly a few hundred MB up to a couple of GB for the full PX12 IPv6 set. On tight memory set `WEB_CONCURRENCY=1` (and raise `GUNICORN_THREADS`) to keep a single in-memory copy; `preload_app` also lets workers share the initial copy via copy-on-write.
+- **Concurrency**: gunicorn `gthread` workers — `WEB_CONCURRENCY` processes × `GUNICORN_THREADS` threads.
 
 ## API Documentation
 
 ### Authentication
-All API endpoints require an API key via header or query parameter:
+When `DISABLE_API_KEY_AUTH=false`, the lookup endpoints require an API key via header or query parameter (`/health` and `/api/v1/info` are always open). If auth is enabled but `API_KEY` is unset or left as the placeholder, every request is denied (fail closed).
 - Header: `X-API-Key: YOUR_API_KEY`
 - Query param: `?api_key=YOUR_API_KEY`
 
@@ -246,19 +244,19 @@ Health check endpoint (no authentication required)
 ```json
 {
   "status": "healthy",
-  "timestamp": "2024-01-15T10:30:00Z",
-  "database": {
-    "status": "healthy",
-    "type": "binary",
-    "path": "/app/db/ip2location.bin"
+  "timestamp": "2026-01-15T10:30:00+00:00",
+  "databases": {
+    "geolocation": { "status": "healthy", "type": "binary", "path": "/app/db/IP2LOCATION-LITE-DB1.BIN" },
+    "asn":         { "status": "healthy", "type": "binary", "path": "/app/db/IP2LOCATION-LITE-ASN.BIN" },
+    "proxy":       { "status": "healthy", "type": "csv", "enabled": true, "path": "/app/db/IP2PROXY-LITE-PX12.IPV6.CSV" }
   },
   "cloudflare_headers": true,
-  "version": "2.0.0"
+  "version": "2.1.0"
 }
 ```
 
 #### GET `/api/v1/lookup`
-Legacy endpoint for backward compatibility
+Single IP lookup returning the full JSON record (same data as `/`).
 
 **Parameters:**
 - `ip` (optional): IP address to lookup. If not provided, uses client's real IP
@@ -304,14 +302,14 @@ Batch IP lookup (up to 100 IPs)
 }
 ```
 
-#### POST `/api/v1/reload`
+#### GET `/api/v1/reload`
 **Manual database reload endpoint**
 
-Forces a check for updated database files and reloads them if changes are detected. Useful for testing or immediate updates without waiting for the next API call.
+Forces an immediate check for updated database files and reloads any that changed. Normally unnecessary — a background watcher reloads updated databases automatically (see Hot Reload below) — but useful for testing.
 
 **Example:**
 ```bash
-curl -X POST "http://localhost:8080/api/v1/reload?api_key=YOUR_API_KEY"
+curl "http://localhost:8080/api/v1/reload?api_key=YOUR_API_KEY"
 ```
 
 **Response:**
@@ -329,6 +327,11 @@ curl -X POST "http://localhost:8080/api/v1/reload?api_key=YOUR_API_KEY"
     "asn": {
       "loaded": true,
       "mtime": 1705316400.456
+    },
+    "proxy": {
+      "loaded": true,
+      "mtime": 1705316400.789,
+      "enabled": true
     }
   }
 }
@@ -392,7 +395,7 @@ The API service automatically detects when the updater service replaces database
 curl "http://localhost:8080/api/v1/info?api_key=YOUR_API_KEY"
 
 # Trigger manual reload check
-curl -X POST "http://localhost:8080/api/v1/reload?api_key=YOUR_API_KEY"
+curl "http://localhost:8080/api/v1/reload?api_key=YOUR_API_KEY"
 
 # Verify reload occurred
 curl "http://localhost:8080/health"
@@ -421,7 +424,9 @@ The `IP2LOCATION_DATABASE_CODE` in your `.env` file determines which database to
 | `API_PORT` | `8080` | Port to expose the API service on. |
 | `DISABLE_API_KEY_AUTH` | `false` | Set to `true` to disable API key authentication. |
 | `IP2LOCATION_DOWNLOAD_TOKEN` | | **Required for commercial databases.** Your IP2Location download token. |
-| `IP2LOCATION_DATABASE_CODE` | `DB11LITE` | The database code to download (e.g., `DB11LITE`, `DB26`). |
+| `IP2LOCATION_DATABASE_CODE` | `DB11LITE` | The database code to download (e.g., `DB11LITE`, `DB26`, `DB11LITEBINIPV6`). |
+| `IP2LOCATION_ASN_DATABASE_CODE` | | ASN database code (e.g., `DBASNLITEBINIPV6`). Refreshed on the same schedule. |
+| `ASN_DATABASE_PATH` | `/app/db/IP2LOCATION-LITE-ASN.BIN` | Path to the ASN binary database file. |
 | `ENABLE_PROXY_DETECTION` | `false` | Enable proxy detection using CSV database. |
 | `PROXY_DATABASE_CODE` | `PX12LITECSVIPV6` | The proxy database code to download (e.g., `PX1LITE`, `PX12LITECSVIPV6`). |
 | `PROXY_DATABASE_PATH` | `/app/db/IP2PROXY-LITE-PX12.IPV6.CSV` | Path to the proxy CSV database file. |
@@ -429,8 +434,15 @@ The `IP2LOCATION_DATABASE_CODE` in your `.env` file determines which database to
 | `BACKUP_ENABLED` | `true` | Enable automatic database backups before updates. |
 | `BACKUP_RETENTION_DAYS` | `7` | How many days to keep backups. |
 | `ENABLE_CLOUDFLARE_HEADERS` | `true` | Parse Cloudflare headers to get the real client IP. |
-| `RATE_LIMIT_PER_MINUTE` | `100` | API rate limit per client IP. |
-| `LOG_LEVEL` | `INFO` | Logging level for the API service. |
+| `RATE_LIMIT_PER_MINUTE` | `100` | Per-client rate limit for the main lookup endpoints. |
+| `CORS_ORIGINS` | `*` | Comma-separated allowlist of CORS origins (`*` = open). |
+| `ENABLE_NEARBY_PROXY_DETECTION` | `true` | Flag IPs near known proxy ranges as probable proxies. |
+| `NEARBY_IP_SEARCH_DISTANCE` | `1000` | Max integer distance to search for nearby proxy ranges. |
+| `NEARBY_IP_MIN_MATCHES` | `3` | Minimum nearby proxy ranges required to flag. |
+| `WEB_CONCURRENCY` | `2` | Gunicorn worker processes. Use `1` to keep a single in-memory proxy copy. |
+| `GUNICORN_THREADS` | `4` | Threads per gunicorn worker. |
+| `RELOAD_CHECK_INTERVAL_SECONDS` | `5` | How often the background watcher checks DB files for changes. |
+| `LOG_LEVEL` | `INFO` | Logging level. |
 
 ### Docker Compose Override
 
@@ -479,28 +491,21 @@ docker-compose exec ip2location-updater python3 /app/entrypoint.py python3 updat
 ## Backup and Recovery
 
 ### Automatic Backups
-- Backups are created before each database update
-- Stored in `./database/backups/`
-- Binary format: `.bin` files
-- Automatic cleanup based on retention period
+- A backup is taken before each database is overwritten
+- Stored in `./database/backups/` (geolocation/ASN `.bin` and proxy `.csv`)
+- Old backups are pruned based on `BACKUP_RETENTION_DAYS`
 
 ### Manual Backup
 ```bash
-# Manual binary backup  
-cp ./db/ip2location.bin ./database/backups/manual_backup_$(date +%Y%m%d).bin
+# Copy whatever is currently in ./db
+cp -a ./db ./database/backups/manual_backup_$(date +%Y%m%d)
 ```
 
-## Performance Metrics
+## Performance & Tuning Notes
 
-Optimized database performance:
-
-| Metric | Geolocation (Binary) | Proxy Detection (CSV) |
-|--------|---------------------|----------------------|
-| Lookup Time | ~40 microseconds | ~100 microseconds |
-| Memory Usage | ~10MB | ~50-100MB |
-| File Size | ~3MB (DB11-LITE) | ~50MB (PX1-LITE) |
-| Concurrent Requests | 1000+ RPS | 1000+ RPS |
-| CPU Usage | Minimal | Low |
+- Geolocation/ASN lookups are binary and fast; the proxy CSV is held in memory and binary-searched.
+- Actual throughput and memory depend on the dataset size and on `WEB_CONCURRENCY` / `GUNICORN_THREADS` — measure in your own environment rather than relying on fixed figures.
+- The proxy CSV (held per worker) is the main memory driver. If memory is tight, set `WEB_CONCURRENCY=1` and raise `GUNICORN_THREADS`.
 
 ## Deployment Behind Cloudflare
 
@@ -573,16 +578,6 @@ services:
         reservations:
           memory: 32M
 ```
-
-## Research Document Insights
-
-This implementation incorporates insights from the research document:
-
-1. **Binary Database Format**: Ultra-fast binary format for optimal performance
-2. **Simplified Architecture**: No unnecessary reverse proxy or database overhead
-3. **Cloudflare Optimization**: Direct header parsing for real IPs  
-4. **Performance Focus**: Microsecond lookup times
-5. **Operational Simplicity**: Daily auto-updates with minimal overhead
 
 ## Attribution
 

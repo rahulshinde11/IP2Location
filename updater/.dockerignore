@@ -1,0 +1,9 @@
+# Keep the build context (and image) lean — these don't belong in the image.
+logs/
+*.log
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.DS_Store
+*.bak

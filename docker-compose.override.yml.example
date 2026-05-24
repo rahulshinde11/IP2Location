@@ -1,99 +1,28 @@
 # Docker Compose Override Example
-# Copy this file to docker-compose.override.yml and customize as needed
-# This file allows you to override or extend the base docker-compose.yml
-
-version: '3.8'
+# Copy this file to docker-compose.override.yml to customize locally.
+# Compose merges it on top of docker-compose.yml automatically.
+#
+# This only references services that actually exist in this stack:
+#   ip2location-api, ip2location-updater, redis
 
 services:
-  # API Service Overrides
   ip2location-api:
-    # Development mode with debug logging
     environment:
       - LOG_LEVEL=DEBUG
-      - FLASK_ENV=development
-    # Expose API directly for development
+      # On tight memory with a large proxy CSV, keep a single in-memory copy:
+      - WEB_CONCURRENCY=1
+      - GUNICORN_THREADS=8
+    # Expose the API directly (handy for local testing without a proxy in front).
     ports:
-      - "5000:5000"
-    # Mount source code for live editing (development only)
-    volumes:
-      - ./api:/app
-    # Override command for development with auto-reload
-    # command: python -m flask run --host=0.0.0.0 --port=5000 --reload
-  
-  # Database Overrides
-  ip2location-db:
-    # Expose MySQL port for direct access
-    ports:
-      - "3306:3306"
-    # Performance tuning
-    command: >
-      --innodb-buffer-pool-size=512M 
-      --query-cache-size=32M
-      --max-connections=200
-      --innodb-log-file-size=128M
-    # Custom MySQL configuration
-    # volumes:
-    #   - ./database/my.cnf:/etc/mysql/conf.d/custom.cnf
-  
-  # Updater Service Overrides
+      - "8080:8080"
+
   ip2location-updater:
     environment:
-      # More frequent updates for testing (every hour)
-      # - UPDATE_SCHEDULE=0 * * * *
-      # Different database version
-      # - IP2LOCATION_DATABASE=DB5-LITE
       - LOG_LEVEL=DEBUG
-    # Mount source for development
-    volumes:
-      - ./updater:/app
-  
-  # Nginx Overrides
-  nginx:
-    # Custom port mapping
-    ports:
-      - "8080:80"
-      - "8443:443"
-    # Additional Nginx configuration
-    # volumes:
-    #   - ./nginx/custom.conf:/etc/nginx/conf.d/custom.conf
-  
-  # Additional development services
-  # Redis for caching (optional)
+      # Update more frequently while testing (e.g. every 6 hours):
+      # - UPDATE_SCHEDULE=0 */6 * * *
+
   redis:
-    image: redis:7-alpine
-    container_name: ip2location-redis
-    restart: unless-stopped
+    # Expose Redis locally for inspection (redis-cli -p 6379).
     ports:
       - "6379:6379"
-    volumes:
-      - redis_data:/data
-    networks:
-      - ip2location_network
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
-  
-  # Adminer for database management (development only)
-  adminer:
-    image: adminer:latest
-    container_name: ip2location-adminer
-    restart: unless-stopped
-    ports:
-      - "8081:8080"
-    environment:
-      ADMINER_DEFAULT_SERVER: ip2location-db
-    networks:
-      - ip2location_network
-    depends_on:
-      - ip2location-db
-
-# Additional volumes
-volumes:
-  redis_data:
-    driver: local
-
-# You can also override networks if needed
-# networks:
-#   ip2location_network:
-#     driver: bridge
-#     ipam:
-#       config:
-#         - subnet: 172.20.0.0/16 

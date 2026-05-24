@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
 
-from flask import Flask, request, jsonify, g, Response
+from flask import Flask, request, g, Response
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
